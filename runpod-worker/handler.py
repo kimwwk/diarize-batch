@@ -53,6 +53,20 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # HF token comes from the worker environment; input.hf_token can override it.
 ENV_HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
+# Diarization: build a 3.1-equivalent pipeline from ungated components, exactly as
+# the local validation harness does. whisperx's default DiarizationPipeline hangs
+# 20+ min because pyannote-audio 4.0.4's SpeakerDiarization.__init__ eagerly
+# downloads community-1's PLDA file even for AgglomerativeClustering (which never
+# uses it). We neutralize that eager fetch and feed audio in-memory (the image's
+# torchcodec is broken — ffmpeg 8 unsupported), which is fast and reliable.
+_SD31_SEGMENTATION = "pyannote/segmentation-3.0"
+_SD31_EMBEDDING = "pyannote/wespeaker-voxceleb-resnet34-LM"
+_SD31_PARAMS = {
+    "clustering": {"method": "centroid", "min_cluster_size": 12,
+                   "threshold": 0.7045654963945799},
+    "segmentation": {"min_duration_off": 0.0},
+}
+
 
 # --- Module-level caches (reused across warm invocations) --------------------
 # Whisper ASR models keyed by (model_name, compute_type). The same worker may be
@@ -95,14 +109,30 @@ def _get_align_model(language_code: str):
 
 
 def _get_diarize_pipeline(hf_token: str):
-    """Load (or fetch from cache) the diarization pipeline.
-
-    Uses the default gated model pyannote/speaker-diarization-community-1.
-    """
+    """Build (and cache) a 3.1-equivalent SpeakerDiarization pipeline from ungated
+    components, with pyannote 4.0.4's eager community-1 PLDA download neutralized."""
     global _diarize_pipeline
     if _diarize_pipeline is None:
-        print(f"[load] diarization pipeline device={DEVICE}")
-        _diarize_pipeline = DiarizationPipeline(token=hf_token, device=DEVICE)
+        import pyannote.audio.pipelines.speaker_diarization as _sd_mod
+        from pyannote.audio.pipelines import SpeakerDiarization
+        print(f"[load] diarization pipeline (3.1-equivalent) device={DEVICE}")
+        _orig_get_plda = _sd_mod.get_plda
+        _sd_mod.get_plda = lambda *a, **k: None  # Agglomerative ignores PLDA
+        try:
+            sd = SpeakerDiarization(
+                segmentation=_SD31_SEGMENTATION,
+                embedding=_SD31_EMBEDDING,
+                embedding_exclude_overlap=True,
+                clustering="AgglomerativeClustering",
+                segmentation_batch_size=32,
+                embedding_batch_size=32,
+                token=hf_token,
+            )
+            sd.instantiate(_SD31_PARAMS)
+            sd.to(torch.device(DEVICE))
+        finally:
+            _sd_mod.get_plda = _orig_get_plda  # restore
+        _diarize_pipeline = sd
     return _diarize_pipeline
 
 
@@ -224,20 +254,31 @@ def handler(job):
                     "diarize=true but no HF token available "
                     "(set HF_TOKEN env var or pass input.hf_token)."
                 )
-            _prog("loading diarization pipeline")
+            _prog("loading diarization pipeline (3.1-equivalent)")
             t = time.time()
-            pipeline = _get_diarize_pipeline(hf_token)
+            sd = _get_diarize_pipeline(hf_token)
             timings["load_diarize_s"] = round(time.time() - t, 1)
-            # Only forward speaker-count hints when actually provided.
-            diarize_kwargs = {}
-            if min_speakers is not None:
-                diarize_kwargs["min_speakers"] = int(min_speakers)
-            if max_speakers is not None:
-                diarize_kwargs["max_speakers"] = int(max_speakers)
             _prog("diarizing")
             t = time.time()
-            diarize_segments = pipeline(audio, **diarize_kwargs)
-            result = whisperx.assign_word_speakers(diarize_segments, result)
+            import pandas as pd
+            # pyannote wants an in-memory {waveform, sample_rate} dict — this also
+            # avoids the broken torchcodec path. Only forward speaker-count hints
+            # when actually provided.
+            waveform = torch.from_numpy(audio[None, :])
+            dkw = {}
+            if min_speakers is not None:
+                dkw["min_speakers"] = int(min_speakers)
+            if max_speakers is not None:
+                dkw["max_speakers"] = int(max_speakers)
+            out_d = sd({"waveform": waveform, "sample_rate": SAMPLE_RATE}, **dkw)
+            annotation = out_d.speaker_diarization
+            diarize_df = pd.DataFrame(
+                annotation.itertracks(yield_label=True),
+                columns=["segment", "label", "speaker"],
+            )
+            diarize_df["start"] = diarize_df["segment"].apply(lambda s: s.start)
+            diarize_df["end"] = diarize_df["segment"].apply(lambda s: s.end)
+            result = whisperx.assign_word_speakers(diarize_df, result)
             timings["diarize_s"] = round(time.time() - t, 1)
             _prog(f"diarized in {timings['diarize_s']}s")
             diarized = True
