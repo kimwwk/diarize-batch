@@ -124,7 +124,13 @@ def main():
         f"idle-down={config.POD_IDLE_SECONDS // 60}min | model={config.MODEL} "
         f"compute={config.COMPUTE_TYPE} lang={config.LANGUAGE or 'auto'}")
     last_activity = time.time()
+    heartbeat = os.path.join(os.path.dirname(config.INBOX_DIR), ".heartbeat")
     while True:
+        try:  # heartbeat so the watchdog knows the orchestrator is alive
+            with open(heartbeat, "w") as fh:
+                fh.write(str(int(time.time())))
+        except Exception:
+            pass
         queue = stable_files()
         if not queue:
             if pod_manager.is_up() and time.time() - last_activity > config.POD_IDLE_SECONDS:

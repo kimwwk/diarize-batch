@@ -23,3 +23,15 @@ services:
       - ${DATA_DIR:-./data}:/data:ro
     ports:
       - "${LINKS_PORT:-8080}:8080"
+
+  # Cost watchdog — kills an orphaned pod if the orchestrator crashes/hangs
+  # (the orchestrator already idle-tears-down pods; this is the backstop).
+  diarize-watchdog:
+    image: meetily-diarize-orchestrator:latest
+    container_name: diarize-watchdog
+    restart: unless-stopped
+    env_file: .env
+    dns: ["8.8.8.8", "1.1.1.1"]
+    command: ["python", "-u", "watchdog.py"]
+    volumes:
+      - ${DATA_DIR:-./data}:/data:ro
