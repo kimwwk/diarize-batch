@@ -37,6 +37,7 @@ reload per request.
 import base64
 import os
 import tempfile
+import time
 import traceback
 
 import runpod
@@ -134,8 +135,31 @@ def _resolve_audio_path(inp: dict) -> tuple:
 def handler(job):
     inp = job.get("input", {}) or {}
     temp_path = None
+    t0 = time.time()
+    timings = {}
+
+    def _prog(msg):
+        try:
+            runpod.serverless.progress_update(job, msg)
+        except Exception:
+            pass
+        print(f"[{time.time() - t0:6.1f}s] {msg}", flush=True)
 
     try:
+        # --- Fail fast if the container did not get a GPU ------------------
+        # A silent CPU fallback runs large-v3 for well over an hour and bills
+        # the whole time; refuse so the caller gets an instant, clear error.
+        if DEVICE != "cuda" or not torch.cuda.is_available():
+            return {
+                "error": "GPU unavailable on this worker — refusing to run on CPU.",
+                "device": DEVICE,
+                "cuda_available": torch.cuda.is_available(),
+                "torch_cuda_version": getattr(torch.version, "cuda", None),
+                "cuda_device_count": torch.cuda.device_count(),
+            }
+        gpu_name = torch.cuda.get_device_name(0)
+        _prog(f"start device=cuda gpu={gpu_name}")
+
         # --- Parse / default the contract inputs ---------------------------
         diarize = bool(inp.get("diarize", True))
         # language: None => autodetect. Keep None explicitly when not provided.
@@ -158,13 +182,22 @@ def handler(job):
         duration = round(len(audio) / SAMPLE_RATE, 3)
 
         # --- Transcribe -----------------------------------------------------
+        _prog(f"loading ASR model={model_name} ({compute_type})")
+        t = time.time()
         asr_model = _get_asr_model(model_name, compute_type, initial_prompt)
+        timings["load_asr_s"] = round(time.time() - t, 1)
+        _prog(f"transcribing (audio {duration:.0f}s, batch={batch_size})")
+        t = time.time()
         # language=None lets WhisperX autodetect; an ISO code forces a language.
         result = asr_model.transcribe(audio, batch_size=batch_size, language=language)
+        timings["transcribe_s"] = round(time.time() - t, 1)
         detected_language = result.get("language") or language or "en"
+        _prog(f"transcribed in {timings['transcribe_s']}s, language={detected_language}")
 
         # --- Align (word-level timestamps) ---------------------------------
         # Alignment is required for accurate per-word speaker assignment.
+        _prog("aligning word timestamps")
+        t = time.time()
         try:
             align_model, metadata = _get_align_model(detected_language)
             result = whisperx.align(
@@ -175,10 +208,13 @@ def handler(job):
                 DEVICE,
                 return_char_alignments=False,
             )
+            timings["align_s"] = round(time.time() - t, 1)
+            _prog(f"aligned in {timings['align_s']}s")
         except Exception as align_err:
             # No alignment model for this language: continue with segment-level
             # timestamps so transcription still succeeds.
-            print(f"[warn] alignment skipped: {align_err}")
+            timings["align_s"] = round(time.time() - t, 1)
+            _prog(f"alignment skipped: {align_err}")
 
         # --- Diarize + assign speakers -------------------------------------
         diarized = False
@@ -188,15 +224,22 @@ def handler(job):
                     "diarize=true but no HF token available "
                     "(set HF_TOKEN env var or pass input.hf_token)."
                 )
+            _prog("loading diarization pipeline")
+            t = time.time()
             pipeline = _get_diarize_pipeline(hf_token)
+            timings["load_diarize_s"] = round(time.time() - t, 1)
             # Only forward speaker-count hints when actually provided.
             diarize_kwargs = {}
             if min_speakers is not None:
                 diarize_kwargs["min_speakers"] = int(min_speakers)
             if max_speakers is not None:
                 diarize_kwargs["max_speakers"] = int(max_speakers)
+            _prog("diarizing")
+            t = time.time()
             diarize_segments = pipeline(audio, **diarize_kwargs)
             result = whisperx.assign_word_speakers(diarize_segments, result)
+            timings["diarize_s"] = round(time.time() - t, 1)
+            _prog(f"diarized in {timings['diarize_s']}s")
             diarized = True
 
         # --- Assemble output contract --------------------------------------
@@ -213,6 +256,8 @@ def handler(job):
                 "text": (seg.get("text") or "").strip(),
             })
 
+        timings["total_s"] = round(time.time() - t0, 1)
+        _prog(f"done: {len(segments)} segments, {len(speakers)} speakers, {timings['total_s']}s")
         return {
             "segments": segments,
             "language": detected_language,
@@ -220,6 +265,9 @@ def handler(job):
             "num_speakers": len(speakers),
             "model": model_name,
             "diarized": diarized,
+            "device": "cuda",
+            "gpu": gpu_name,
+            "timings": timings,
         }
 
     except Exception as exc:  # noqa: BLE001 — surface any failure to the caller.
