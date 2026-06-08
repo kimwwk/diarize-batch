@@ -1,3 +1,2 @@
-# Orchestrator deps — intentionally tiny. Heavy ML runs on RunPod, not here.
+# Orchestrator deps — intentionally tiny. Heavy ML runs on the RunPod pod.
 requests>=2.31
-boto3>=1.34

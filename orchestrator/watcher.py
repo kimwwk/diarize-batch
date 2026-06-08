@@ -1,25 +1,26 @@
-"""Drop-and-forget batch orchestrator.
+"""Drop-and-forget orchestrator (pod mode).
 
-Loop: watch INBOX_DIR, pick the oldest stable audio file, compress it to 16 kHz
-mono FLAC, upload to the RunPod network volume, run the serverless diarization
-job, write the transcript to OUTBOX_DIR, then delete the remote audio and archive
-the input. Exactly one file is processed at a time (FIFO), so a cold RunPod
-worker simply means the queue waits — nothing is lost.
+Watch INBOX_DIR. When a file lands: ensure an on-demand RunPod pod is up, downmix
+to 16 kHz mono FLAC, POST it to the pod's FastAPI over an SSH tunnel (no base64,
+no public endpoint), render the transcript to OUTBOX_DIR, and archive the input.
+When the inbox has been idle for POD_IDLE_MINUTES, tear the pod down ($0 idle).
 """
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime
 
 import config
+import pod_manager
 import render
-import runpod_client
 
 
 def log(msg):
-    print(f"[orchestrator] {msg}", flush=True)
+    print(f"[orchestrator] {datetime.now().strftime('%H:%M:%S')} {msg}", flush=True)
 
 
 def ensure_dirs():
@@ -33,8 +34,7 @@ def _is_audio(path):
 
 
 def stable_files():
-    """Audio files in the inbox that haven't been modified for STABLE_SECONDS
-    (so we don't grab a file mid-copy), oldest first."""
+    """Audio files untouched for STABLE_SECONDS (so we don't grab a mid-copy file)."""
     now = time.time()
     found = []
     for name in os.listdir(config.INBOX_DIR):
@@ -51,61 +51,42 @@ def stable_files():
 
 
 def to_flac(src, dst):
-    """Downmix to 16 kHz mono FLAC — lossless for ASR, ~10x smaller to upload."""
     cmd = ["ffmpeg", "-y", "-i", src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "flac", dst]
     proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode('utf-8', 'replace')[-500:]}")
+        raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode('utf-8', 'replace')[-400:]}")
 
 
-def process(path):
+def process(path, t_detect):
+    """Transcribe one file via the (already-up) pod and write outputs."""
     name = os.path.basename(path)
     stem = os.path.splitext(name)[0]
-    job_id = uuid.uuid4().hex[:12]
+    job_id = uuid.uuid4().hex[:8]
     flac = os.path.join(config.WORK_DIR, f"{job_id}.flac")
-    key = f"{config.REMOTE_PREFIX}/{job_id}.flac"
-
-    log(f"processing '{name}' (job {job_id})")
     to_flac(path, flac)
-    worker_path = runpod_client.upload_audio(flac, key)
-    log(f"uploaded -> {worker_path}")
-
     try:
-        payload = {
-            "audio_path": worker_path,
-            "diarize": config.DIARIZE,
-            "language": config.LANGUAGE,
-            "model": config.MODEL,
-            "compute_type": config.COMPUTE_TYPE,
-            "batch_size": config.BATCH_SIZE,
-        }
-        if config.MIN_SPEAKERS is not None:
-            payload["min_speakers"] = config.MIN_SPEAKERS
-        if config.MAX_SPEAKERS is not None:
-            payload["max_speakers"] = config.MAX_SPEAKERS
-        if config.INITIAL_PROMPT:
-            payload["initial_prompt"] = config.INITIAL_PROMPT
-
-        rp_job = runpod_client.submit(payload)
-        log(f"submitted RunPod job {rp_job}; waiting for completion...")
-        result = runpod_client.wait(
-            rp_job,
-            on_tick=lambda status, waited: log(f"  job {rp_job}: {status} ({waited}s)"),
-        )
-        if "error" in result:
-            raise RuntimeError(f"worker error: {result['error']}")
+        log(f"uploading '{name}' to pod ...")
+        result = pod_manager.infer(
+            flac, language=config.LANGUAGE,
+            min_speakers=config.MIN_SPEAKERS, max_speakers=config.MAX_SPEAKERS,
+            initial_prompt=config.INITIAL_PROMPT, compute_type=config.COMPUTE_TYPE)
+        if isinstance(result, dict) and "error" in result:
+            raise RuntimeError(f"pod error: {str(result['error'])[:300]}")
         if not result.get("segments"):
-            raise RuntimeError(f"worker returned no segments: {result}")
+            raise RuntimeError(f"pod returned no segments: {str(result)[:200]}")
 
         out_stem = os.path.join(config.OUTBOX_DIR, stem)
         files = render.write_outputs(result, out_stem, name)
-        log(f"done: {result.get('num_speakers', '?')} speakers, "
-            f"{len(result['segments'])} segments -> {os.path.basename(files[0])} (+{len(files) - 1} more)")
     finally:
-        if not config.KEEP_REMOTE_AUDIO:
-            runpod_client.delete_audio(key)
         if os.path.exists(flac):
             os.remove(flac)
+
+    t_done = time.time()
+    log(f"DONE '{name}': {result.get('num_speakers', '?')} speakers, "
+        f"{len(result['segments'])} segments -> {[os.path.basename(f) for f in files]}")
+    log(f"TIMING '{name}': detected {datetime.fromtimestamp(t_detect).strftime('%H:%M:%S')} "
+        f"-> transcript {datetime.fromtimestamp(t_done).strftime('%H:%M:%S')} "
+        f"= {int(t_done - t_detect)}s  (pod pipeline {result.get('timings', {}).get('total_s', '?')}s)")
 
     if config.DELETE_INPUT_AFTER:
         os.remove(path)
@@ -113,40 +94,63 @@ def process(path):
         shutil.move(path, os.path.join(config.DONE_DIR, name))
 
 
+def fail_file(path, exc):
+    name = os.path.basename(path)
+    log(f"FAILED '{name}': {exc}")
+    dest = os.path.join(config.FAILED_DIR, name)
+    try:
+        shutil.move(path, dest)
+    except Exception:
+        dest = path
+    with open(dest + ".error.txt", "w", encoding="utf-8") as fh:
+        fh.write(str(exc) + "\n")
+
+
 def main():
     ensure_dirs()
     missing = config.validate()
     if missing:
-        log(f"FATAL: missing required config: {', '.join(missing)}")
+        log(f"FATAL: missing config: {', '.join(missing)}")
         sys.exit(1)
 
-    log(f"watching {config.INBOX_DIR} | diarize={config.DIARIZE} model={config.MODEL} "
-        f"language={config.LANGUAGE or 'auto'}")
+    def _shutdown(*_):
+        log("shutting down — terminating pod")
+        pod_manager.terminate()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    log(f"watching {config.INBOX_DIR} | pod={config.POD_NAME} dc={config.POD_DC} "
+        f"idle-down={config.POD_IDLE_SECONDS // 60}min | model={config.MODEL} "
+        f"compute={config.COMPUTE_TYPE} lang={config.LANGUAGE or 'auto'}")
+    last_activity = time.time()
     while True:
-        try:
-            queue = stable_files()
-            if not queue:
-                time.sleep(config.SCAN_INTERVAL)
-                continue
-            path = queue[0]
-            try:
-                process(path)
-            except Exception as exc:  # noqa: BLE001 - one bad file must not kill the loop
-                name = os.path.basename(path)
-                log(f"FAILED '{name}': {exc}")
-                dest = os.path.join(config.FAILED_DIR, name)
-                try:
-                    shutil.move(path, dest)
-                except Exception:
-                    dest = path
-                with open(dest + ".error.txt", "w", encoding="utf-8") as fh:
-                    fh.write(str(exc) + "\n")
-        except KeyboardInterrupt:
-            log("shutting down")
-            break
-        except Exception as exc:  # noqa: BLE001 - keep the watcher alive
-            log(f"loop error: {exc}")
+        queue = stable_files()
+        if not queue:
+            if pod_manager.is_up() and time.time() - last_activity > config.POD_IDLE_SECONDS:
+                log(f"inbox idle >{config.POD_IDLE_SECONDS // 60}min — tearing pod down")
+                pod_manager.terminate()
             time.sleep(config.SCAN_INTERVAL)
+            continue
+
+        path = queue[0]
+        t_detect = time.time()
+        log(f"DETECTED '{os.path.basename(path)}' at {datetime.fromtimestamp(t_detect).strftime('%H:%M:%S')}")
+        try:
+            pod_manager.ensure_up()  # boot the pod (transient failure -> retry, file stays)
+        except Exception as exc:  # noqa: BLE001
+            log(f"pod boot failed (will retry): {exc}")
+            pod_manager.terminate()
+            time.sleep(config.SCAN_INTERVAL)
+            continue
+        try:
+            process(path, t_detect)
+            last_activity = time.time()
+        except KeyboardInterrupt:
+            _shutdown()
+        except Exception as exc:  # noqa: BLE001 - a bad file must not kill the loop
+            fail_file(path, exc)
+            last_activity = time.time()
 
 
 if __name__ == "__main__":

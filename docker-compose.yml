@@ -1,5 +1,5 @@
-# Run on your Proxmox box:  docker compose up -d --build
-# Drop audio into ${DATA_DIR}/inbox ; read transcripts from ${DATA_DIR}/outbox
+# Run on your Proxmox box / WSL:  docker compose up -d --build
+# Drop audio into ${DATA_DIR}/inbox ; read transcripts at http://<host>:8080/
 services:
   diarize-orchestrator:
     build: ./orchestrator
@@ -7,6 +7,19 @@ services:
     container_name: diarize-orchestrator
     restart: unless-stopped
     env_file: .env
+    dns: ["8.8.8.8", "1.1.1.1"]          # don't depend on a flaky host resolver
     volumes:
-      # Host data dir <-> /data (holds inbox, outbox, done, failed, work)
-      - ${DATA_DIR:-./data}:/data
+      - ${DATA_DIR:-./data}:/data         # inbox, outbox, done, failed, work
+      - ./secrets:/secrets:ro             # SSH key for the pod tunnel (read-only)
+
+  # Static file server so transcripts are clickable links:
+  #   http://<host>:8080/<name>.md  (.json/.srt/.txt too)
+  diarize-fileserver:
+    image: python:3.12-slim
+    container_name: diarize-fileserver
+    restart: unless-stopped
+    command: ["python", "-m", "http.server", "8080", "--directory", "/data/outbox"]
+    volumes:
+      - ${DATA_DIR:-./data}:/data:ro
+    ports:
+      - "${LINKS_PORT:-8080}:8080"

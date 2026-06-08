@@ -23,15 +23,27 @@ RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY", "").strip()
 RUNPOD_ENDPOINT_ID = os.environ.get("RUNPOD_ENDPOINT_ID", "").strip()
 RUNPOD_BASE_URL = os.environ.get("RUNPOD_BASE_URL", "https://api.runpod.ai/v2").rstrip("/")
 
-# --- RunPod S3-compatible network volume (used to ship the audio file) ---
-# The volume id IS the S3 bucket name. A file uploaded under key "foo/bar.flac"
-# is visible to the worker at "/runpod-volume/foo/bar.flac".
-S3_ENDPOINT = os.environ.get("RUNPOD_S3_ENDPOINT", "").strip()   # e.g. https://s3api-us-il-1.runpod.io/
-S3_REGION = os.environ.get("RUNPOD_S3_REGION", "").strip()       # e.g. us-il-1
-S3_ACCESS_KEY = os.environ.get("RUNPOD_S3_ACCESS_KEY", "").strip()
-S3_SECRET_KEY = os.environ.get("RUNPOD_S3_SECRET_KEY", "").strip()
-VOLUME_ID = os.environ.get("RUNPOD_NETWORK_VOLUME_ID", "").strip()  # = S3 bucket name
-REMOTE_PREFIX = os.environ.get("REMOTE_PREFIX", "diarize-inbox").strip("/")
+# --- HuggingFace token (passed to the pod for the diarization models) ---
+HF_TOKEN = (os.environ.get("HF_TOKEN", "") or os.environ.get("HF_AUTH_TOKEN", "")).strip()
+
+# --- On-demand POD config (the orchestrator creates/destroys this) ---
+POD_NAME = os.environ.get("POD_NAME", "diarize-batch-pod").strip()
+POD_IMAGE = os.environ.get("POD_IMAGE", "kimwwk/meetily-diarize-whisperx-worker:pod").strip()
+POD_DC = os.environ.get("POD_DC", "EUR-IS-3").strip()
+POD_VOLUME_ID = os.environ.get("RUNPOD_NETWORK_VOLUME_ID", "").strip()  # warm model cache; blank = none
+POD_DISK_GB = int(os.environ.get("POD_DISK_GB", "30"))
+POD_GPU_IDS = [g.strip() for g in os.environ.get(
+    "POD_GPU_IDS",
+    "NVIDIA RTX A5000,NVIDIA GeForce RTX 4090,NVIDIA L4,NVIDIA A40,NVIDIA L40,"
+    "NVIDIA L40S,NVIDIA GeForce RTX 5090,NVIDIA A100-SXM4-80GB,NVIDIA H100 80GB HBM3"
+).split(",") if g.strip()]
+POD_BOOT_TIMEOUT = int(os.environ.get("POD_BOOT_TIMEOUT", "600"))      # secs to boot + /health
+POD_IDLE_SECONDS = int(os.environ.get("POD_IDLE_MINUTES", "5")) * 60    # tear down after this idle
+
+# --- SSH tunnel to the pod (key-gated; the API stays on the pod's localhost) ---
+SSH_KEY_PATH = os.environ.get("SSH_KEY_PATH", "/secrets/pod_ed25519").strip()
+SSH_PUBKEY_PATH = SSH_KEY_PATH + ".pub"
+LOCAL_PORT = int(os.environ.get("LOCAL_PORT", "8000"))   # local end of the tunnel
 
 # --- Local folders (inside the container; map /data to a host dir via compose) ---
 INBOX_DIR = os.environ.get("INBOX_DIR", "/data/inbox")
@@ -67,15 +79,13 @@ AUDIO_EXTS = {
 
 _REQUIRED = {
     "RUNPOD_API_KEY": RUNPOD_API_KEY,
-    "RUNPOD_ENDPOINT_ID": RUNPOD_ENDPOINT_ID,
-    "RUNPOD_S3_ENDPOINT": S3_ENDPOINT,
-    "RUNPOD_S3_REGION": S3_REGION,
-    "RUNPOD_S3_ACCESS_KEY": S3_ACCESS_KEY,
-    "RUNPOD_S3_SECRET_KEY": S3_SECRET_KEY,
-    "RUNPOD_NETWORK_VOLUME_ID": VOLUME_ID,
+    "HF_TOKEN": HF_TOKEN,
 }
 
 
 def validate():
-    """Return the list of required env vars that are missing/empty."""
-    return [name for name, value in _REQUIRED.items() if not value]
+    """Return the list of required config that is missing/empty."""
+    missing = [name for name, value in _REQUIRED.items() if not value]
+    if not os.path.exists(SSH_PUBKEY_PATH):
+        missing.append(f"ssh key file ({SSH_PUBKEY_PATH})")
+    return missing

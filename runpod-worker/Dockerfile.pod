@@ -1,0 +1,21 @@
+# Pod image — builds ON TOP of the (already-built) serverless worker image, adding
+# sshd + a FastAPI server. The pod runs this instead of the serverless handler.
+# Model cache + HF_HOME come from the base image (/runpod-volume/models); attach the
+# existing network volume at /runpod-volume when creating the pod for warm models.
+FROM kimwwk/meetily-diarize-whisperx-worker:v4-diar31fix
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-server \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart \
+    && mkdir -p /run/sshd \
+    && sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
+    && sed -i 's/#\?AllowTcpForwarding.*/AllowTcpForwarding yes/' /etc/ssh/sshd_config
+
+COPY pipeline.py server.py pod-entrypoint.sh /app/
+WORKDIR /app
+
+EXPOSE 22
+CMD ["bash", "/app/pod-entrypoint.sh"]
