@@ -26,3 +26,9 @@ __pycache__/
 
 # scratch validation outputs
 _validation/
+
+# raw credential drops (S3 keys etc.)
+credentials
+*credentials*
+*.pem
+*Zone.Identifier
