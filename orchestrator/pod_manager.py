@@ -47,10 +47,11 @@ def _create():
     body = {
         "name": config.POD_NAME, "imageName": config.POD_IMAGE,
         "gpuTypeIds": config.POD_GPU_IDS, "gpuCount": 1,
-        "dataCenterIds": [config.POD_DC], "ports": ["22/tcp"],
-        "containerDiskInGb": config.POD_DISK_GB,
+        "ports": ["22/tcp"], "containerDiskInGb": config.POD_DISK_GB,
         "env": {"PUBLIC_KEY": pub, "HF_TOKEN": config.HF_TOKEN},
     }
+    if config.POD_DCS:
+        body["dataCenterIds"] = config.POD_DCS
     if config.POD_VOLUME_ID:
         body["networkVolumeId"] = config.POD_VOLUME_ID
         body["volumeMountPath"] = "/runpod-volume"
@@ -58,7 +59,7 @@ def _create():
     pid = d.get("id")
     if not pid:
         raise RuntimeError(f"pod create failed: {d}")
-    log(f"created pod {pid} (gpu pool {len(config.POD_GPU_IDS)} types, dc {config.POD_DC})")
+    log(f"created pod {pid} (gpu pool {len(config.POD_GPU_IDS)} types, dc {','.join(config.POD_DCS) or 'any'})")
     return pid
 
 

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Pod image — builds ON TOP of the (already-built) serverless worker image, adding
 # sshd + a FastAPI server. The pod runs this instead of the serverless handler.
 # Model cache + HF_HOME come from the base image (/runpod-volume/models); attach the
@@ -14,8 +15,15 @@ RUN apt-get update \
     && sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
     && sed -i 's/#\?AllowTcpForwarding.*/AllowTcpForwarding yes/' /etc/ssh/sshd_config
 
-COPY pipeline.py server.py pod-entrypoint.sh /app/
+COPY pipeline.py server.py pod-entrypoint.sh bake_models.py /app/
 WORKDIR /app
+
+# Bake the models into the image so the pod needs NO network volume and can run on a
+# cheap GPU in any datacenter. The HF token (gated pyannote) is passed via a BuildKit
+# SECRET mount — it is NEVER stored in the image or its `docker history`.
+#   docker build --secret id=hf_token,src=<file> ...
+RUN --mount=type=secret,id=hf_token \
+    HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || echo '')" python /app/bake_models.py
 
 EXPOSE 22
 CMD ["bash", "/app/pod-entrypoint.sh"]

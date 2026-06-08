@@ -28,14 +28,17 @@ HF_TOKEN = (os.environ.get("HF_TOKEN", "") or os.environ.get("HF_AUTH_TOKEN", ""
 
 # --- On-demand POD config (the orchestrator creates/destroys this) ---
 POD_NAME = os.environ.get("POD_NAME", "diarize-batch-pod").strip()
-POD_IMAGE = os.environ.get("POD_IMAGE", "kimwwk/meetily-diarize-whisperx-worker:pod").strip()
-POD_DC = os.environ.get("POD_DC", "EUR-IS-3").strip()
-POD_VOLUME_ID = os.environ.get("RUNPOD_NETWORK_VOLUME_ID", "").strip()  # warm model cache; blank = none
-POD_DISK_GB = int(os.environ.get("POD_DISK_GB", "30"))
+POD_IMAGE = os.environ.get("POD_IMAGE", "kimwwk/meetily-diarize-whisperx-worker:pod-baked").strip()
+# Datacenters to allow (comma-separated). Blank = let RunPod pick ANY DC with an
+# available GPU — best for cheap-GPU availability (only valid with no pinning volume).
+POD_DCS = [d.strip() for d in os.environ.get("POD_DC", "").split(",") if d.strip()]
+POD_VOLUME_ID = os.environ.get("RUNPOD_NETWORK_VOLUME_ID", "").strip()  # blank = models baked in the image
+POD_DISK_GB = int(os.environ.get("POD_DISK_GB", "40"))
+# Cheap-first: the worker needs only ~8GB at float16, so prefer cheap 16-24GB cards.
 POD_GPU_IDS = [g.strip() for g in os.environ.get(
     "POD_GPU_IDS",
-    "NVIDIA RTX A5000,NVIDIA GeForce RTX 4090,NVIDIA L4,NVIDIA A40,NVIDIA L40,"
-    "NVIDIA L40S,NVIDIA GeForce RTX 5090,NVIDIA A100-SXM4-80GB,NVIDIA H100 80GB HBM3"
+    "NVIDIA RTX A4000,NVIDIA RTX A4500,NVIDIA RTX A5000,NVIDIA GeForce RTX 3090,"
+    "NVIDIA GeForce RTX 4090,NVIDIA L4,NVIDIA A40,NVIDIA L40,NVIDIA L40S"
 ).split(",") if g.strip()]
 POD_BOOT_TIMEOUT = int(os.environ.get("POD_BOOT_TIMEOUT", "600"))      # secs to boot + /health
 POD_IDLE_SECONDS = int(os.environ.get("POD_IDLE_MINUTES", "5")) * 60    # tear down after this idle

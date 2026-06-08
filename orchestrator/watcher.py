@@ -120,7 +120,7 @@ def main():
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
-    log(f"watching {config.INBOX_DIR} | pod={config.POD_NAME} dc={config.POD_DC} "
+    log(f"watching {config.INBOX_DIR} | pod={config.POD_NAME} dc={','.join(config.POD_DCS) or 'any'} "
         f"idle-down={config.POD_IDLE_SECONDS // 60}min | model={config.MODEL} "
         f"compute={config.COMPUTE_TYPE} lang={config.LANGUAGE or 'auto'}")
     last_activity = time.time()
