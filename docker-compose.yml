@@ -1,0 +1,12 @@
+# Run on your Proxmox box:  docker compose up -d --build
+# Drop audio into ${DATA_DIR}/inbox ; read transcripts from ${DATA_DIR}/outbox
+services:
+  diarize-orchestrator:
+    build: ./orchestrator
+    image: meetily-diarize-orchestrator:latest
+    container_name: diarize-orchestrator
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Host data dir <-> /data (holds inbox, outbox, done, failed, work)
+      - ${DATA_DIR:-./data}:/data

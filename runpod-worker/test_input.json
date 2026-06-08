@@ -1,0 +1,10 @@
+{
+  "input": {
+    "audio_path": "/runpod-volume/test.flac",
+    "diarize": true,
+    "language": "en",
+    "model": "large-v3",
+    "batch_size": 8,
+    "compute_type": "float16"
+  }
+}

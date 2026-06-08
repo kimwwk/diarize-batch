@@ -1,0 +1,28 @@
+# secrets
+.env
+*.env
+!.env.example
+
+# runtime data
+data/
+outbox/
+inbox/
+done/
+failed/
+work/
+
+# local validation venv + model caches (heavy, regenerable)
+.venv/
+venv/
+*.venv
+models/
+.cache/
+.hf/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# scratch validation outputs
+_validation/

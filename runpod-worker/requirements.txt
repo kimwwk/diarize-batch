@@ -1,0 +1,17 @@
+# Python dependencies for the meetily diarize WhisperX RunPod worker.
+#
+# Pins chosen to match the known-good reference stack (DocChat7/whisperx-worker)
+# running on the pytorch/pytorch CUDA 12.x base image:
+#
+#   whisperx 3.8.5       -> diarization API: whisperx.diarize.DiarizationPipeline
+#                           (token=..., default model pyannote/
+#                           speaker-diarization-community-1) + assign_word_speakers.
+#   ctranslate2 4.7.1    -> faster-whisper backend ABI compatible with torch 2.8 / CUDA 12.8.
+#   pyannote-audio 4.0.4 -> speaker-diarization-community-1 + segmentation-3.0.
+#
+# torch / torchaudio are provided by the base image and are intentionally NOT
+# pinned here to avoid clobbering the CUDA-matched build.
+whisperx==3.8.5
+ctranslate2==4.7.1
+pyannote-audio==4.0.4
+runpod>=1.7
