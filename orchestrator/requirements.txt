@@ -1,2 +1,5 @@
-# Orchestrator deps — intentionally tiny. Heavy ML runs on the RunPod pod.
+# Orchestrator deps. Heavy ML runs on the RunPod pod; the only local model is the
+# small CPU speaker-embedding (resemblyzer) used to tag known voices.
 requests>=2.31
+numpy
+resemblyzer

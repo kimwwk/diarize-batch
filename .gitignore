@@ -35,3 +35,7 @@ credentials
 
 # ssh keys for the pod tunnel
 secrets/
+
+# speaker-id reference voices (private audio — never commit); keep the README
+refs/*
+!refs/README.md

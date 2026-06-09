@@ -17,6 +17,7 @@ from datetime import datetime
 import config
 import pod_manager
 import render
+import speaker_id
 
 
 def log(msg):
@@ -77,6 +78,13 @@ def process(path, t_detect):
 
         out_stem = os.path.join(config.OUTBOX_DIR, stem)
         files = render.write_outputs(result, out_stem, name)
+        try:  # best-effort speaker tagging; must never fail the transcript
+            tag = speaker_id.write_speaker_map(flac, result.get("segments", []), out_stem, name)
+            if tag:
+                files.append(tag)
+                log(f"speaker-id -> {os.path.basename(tag)}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"speaker-id skipped: {exc}")
     finally:
         if os.path.exists(flac):
             os.remove(flac)

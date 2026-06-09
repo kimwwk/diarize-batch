@@ -80,6 +80,11 @@ AUDIO_EXTS = {
     if e.strip()
 }
 
+# --- Speaker identification (optional; writes an extra <stem>.speakers.json) ---
+SPEAKER_ID = _bool("SPEAKER_ID", True)      # tag known voices in a separate file
+REF_DIR = os.environ.get("REF_DIR", "/refs").strip()   # ref clips: <Name>.<ext>
+SPEAKER_MIN_SIM = float(os.environ.get("SPEAKER_MIN_SIM", "0.70"))  # cosine cutoff
+
 _REQUIRED = {
     "RUNPOD_API_KEY": RUNPOD_API_KEY,
     "HF_TOKEN": HF_TOKEN,

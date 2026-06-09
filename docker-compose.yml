@@ -11,6 +11,7 @@ services:
     volumes:
       - ${DATA_DIR:-./data}:/data         # inbox, outbox, done, failed, work
       - ./secrets:/secrets:ro             # SSH key for the pod tunnel (read-only)
+      - ./refs:/refs:ro                   # speaker-id reference voices (gitignored)
 
   # Upload + serve frontend:
   #   GET  http://<host>:8080/            -> drag-and-drop upload box + transcript list
