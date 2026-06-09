@@ -32,11 +32,13 @@ MAX_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "2048")) * 1024 * 1024
 # X-Upload-Token header). Leave unset to keep the endpoint open (LAN use).
 UPLOAD_TOKEN = os.environ.get("UPLOAD_TOKEN", "").strip()
 # Accepted upload extensions — mirror the orchestrator's AUDIO_EXTS default.
+# Use `or _DEFAULT_EXTS` so an *empty* env var still falls back to the default:
+# compose passes AUDIO_EXTS="" when it isn't set in .env, and os.environ.get
+# returns that "" (not the default), which would otherwise accept nothing.
+_DEFAULT_EXTS = ".mp4,.m4a,.wav,.flac,.mp3,.aac,.ogg,.webm,.opus,.mkv"
 AUDIO_EXTS = {
     e.strip().lower()
-    for e in os.environ.get(
-        "AUDIO_EXTS", ".mp4,.m4a,.wav,.flac,.mp3,.aac,.ogg,.webm,.opus,.mkv"
-    ).split(",")
+    for e in (os.environ.get("AUDIO_EXTS", "").strip() or _DEFAULT_EXTS).split(",")
     if e.strip()
 }
 
