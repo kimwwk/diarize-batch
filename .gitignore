@@ -32,3 +32,6 @@ credentials
 *credentials*
 *.pem
 *Zone.Identifier
+
+# ssh keys for the pod tunnel
+secrets/
