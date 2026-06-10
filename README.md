@@ -4,7 +4,6 @@
 
 ### Turn any meeting recording into a clean, speaker-labelled transcript — privately, on your own hardware, for pennies.
 
-[![GitHub stars](https://img.shields.io/github/stars/kimwwk/diarize-batch?style=flat&logo=github)](https://github.com/kimwwk/diarize-batch/stargazers)
 ![Self-hosted](https://img.shields.io/badge/self--hosted-yes-success)
 ![Idle cost](https://img.shields.io/badge/idle_cost-%240-success)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
@@ -192,7 +191,3 @@ diarize-batch/
 - [Resemblyzer](https://github.com/resemble-ai/Resemblyzer) — the CPU voice embeddings behind speaker-id.
 - [RunPod](https://runpod.io) — the on-demand GPU.
 - Built for the [Meetily](https://github.com/Zackriya-Solutions/meetily) recording workflow.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/chart?repos=kimwwk/diarize-batch&type=Date)](https://star-history.com/#kimwwk/diarize-batch&Date)
