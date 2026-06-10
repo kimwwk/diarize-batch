@@ -1,16 +1,45 @@
-# diarize-batch
+<div align="center">
 
-**Turn any meeting recording into a clean, speaker-labelled transcript — privately, on
-your own hardware, for pennies.**
+# 🎙️ diarize-batch
 
-Drop an audio file into a folder (or onto a web page) and get back `.md / .srt / .txt /
-.json` of who-said-what — plus an optional tag for *which speaker is you*. The heavy GPU
-work (WhisperX `large-v3` + pyannote diarization) runs on a RunPod GPU pod that spins up
-on demand and self-destructs when idle, so it costs **$0 at rest** and your transcript
-never leaves your machine.
+### Turn any meeting recording into a clean, speaker-labelled transcript — privately, on your own hardware, for pennies.
 
-> **Stack:** WhisperX `large-v3` · pyannote `speaker-diarization-community-1` · on-demand
-> RunPod GPU · resemblyzer voice-ID · Docker Compose.
+[![GitHub stars](https://img.shields.io/github/stars/kimwwk/diarize-batch?style=flat&logo=github)](https://github.com/kimwwk/diarize-batch/stargazers)
+![Self-hosted](https://img.shields.io/badge/self--hosted-yes-success)
+![Idle cost](https://img.shields.io/badge/idle_cost-%240-success)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![GPU](https://img.shields.io/badge/GPU-RunPod-673AB7)
+
+**[Quickstart](#quickstart) • [How it works](#how-it-works) • [Speaker ID](#speaker-identification) • [Roadmap](#roadmap)**
+
+<p align="center">
+Drop an audio file into a folder (or onto a web page) and get back
+<code>.md / .srt / .txt / .json</code> of who-said-what — plus an optional tag for
+<i>which speaker is you</i>. The heavy GPU work (WhisperX <code>large-v3</code> + pyannote
+diarization) runs on a RunPod GPU pod that spins up on demand and self-destructs when
+idle, so it costs <b>$0 at rest</b> and your transcript never leaves your machine.
+</p>
+
+</div>
+
+---
+
+> **Stack:** WhisperX `large-v3` · pyannote `speaker-diarization-community-1` · on-demand RunPod GPU · resemblyzer voice-ID · Docker Compose
+
+<details>
+<summary><b>Table of Contents</b></summary>
+
+- [Why it exists](#why-it-exists)
+- [How it works](#how-it-works)
+- [Quickstart](#quickstart)
+- [Speaker identification](#speaker-identification)
+- [Configuration](#configuration)
+- [Layout](#layout)
+- [Roadmap](#roadmap)
+- [Acknowledgments](#acknowledgments)
+
+</details>
 
 ## Why it exists
 
@@ -19,16 +48,12 @@ self-hosted GPU is private but wasteful to leave idling. **diarize-batch splits 
 difference** — local-first and private, but backed by on-demand cloud GPU you pay for
 only while it's actually transcribing.
 
-- 🔒 **Your data stays home.** Audio only briefly transits the GPU pod (unavoidable for
-  cloud GPU) over a private, key-gated SSH tunnel — never a public endpoint. It's
-  destroyed with the pod; the transcript is written *only* to your box.
-- 💸 **Pay only while it works.** No always-on server, no idle GPU, no storage volume. A
-  pod is created per meeting and torn down minutes later — ≈ **$0.10–0.30** each, **$0**
-  in between.
-- 🎯 **Drop-and-forget.** Put a file in, come back to a finished transcript. No
-  dashboards, no babysitting — a simple FIFO queue.
-- 🗣️ **Knows who's who.** Optional voice matching tags which speaker is *you* (or any
-  enrolled voice) across every meeting — in a side file that never alters the transcript.
+| | |
+|---|---|
+| 🔒 **Your data stays home** | Audio only briefly transits the GPU pod (unavoidable for cloud GPU) over a private, key-gated SSH tunnel — never a public endpoint. It's destroyed with the pod; the transcript is written *only* to your box. |
+| 💸 **Pay only while it works** | No always-on server, no idle GPU, no storage volume. A pod is created per meeting and torn down minutes later — ≈ **$0.10–0.30** each, **$0** in between. |
+| 🎯 **Drop-and-forget** | Put a file in, come back to a finished transcript. No dashboards, no babysitting — a simple FIFO queue. |
+| 🗣️ **Knows who's who** | Optional voice matching tags which speaker is *you* (or any enrolled voice) across every meeting — in a side file that never alters the transcript. |
 
 ## How it works
 
@@ -58,7 +83,7 @@ voices, then deletes the pod once the queue is idle.
 ## Quickstart
 
 **Prerequisites:** a Hugging Face read token (accept the gated `pyannote/
-speaker-diarization-community-1` and `pyannote/segmentation-3.0`), and a RunPod API key.
+speaker-diarization-community-1` and `pyannote/segmentation-3.0`) and a RunPod API key.
 The GPU side uses a **public pre-built image** (`kimwwk/
 meetily-diarize-whisperx-worker:pod-baked`, models baked in, no volume) — nothing to
 build unless you want your own worker.
@@ -81,22 +106,22 @@ docker compose up -d --build  # orchestrator + web page + cost watchdog
 
 Then add a recording either way:
 
-- **Web (easiest):** open `http://<host>:8080/`, drag the file onto the drop zone. The
+- 🌐 **Web (easiest):** open `http://<host>:8080/`, drag the file onto the drop zone. The
   same page lists every transcript.
-- **CLI:** `cp ~/some-meeting.mp4 ./data/inbox/`.
+- ⌨️ **CLI:** `cp ~/some-meeting.mp4 ./data/inbox/`.
 
 Results appear in `./data/outbox/` as `<name>.md / .srt / .txt / .json` (+ an optional
-`.speakers.json`), browsable at `http://<host>:8080/`. Processed input moves to
-`done/`; failures move to `failed/` with a `.error.txt`. Files follow a
+`.speakers.json`), browsable at `http://<host>:8080/`. Processed input moves to `done/`;
+failures move to `failed/` with a `.error.txt`. Files follow a
 `YYYY-MM-DD_HHMM_<slug>.<ext>` naming convention (meeting date/time + a short slug).
 
 > **Meetily users:** the recording is at `~/Music/meetily-recordings/<Meeting>/audio.mp4`
 > (Windows; `~/Movies/...` macOS, `~/Documents/...` Linux). Upload that file.
 
-## Speaker identification (optional)
+## Speaker identification
 
 If `refs/<Name>.<ext>` voice clips exist and `SPEAKER_ID=true` (default), each job also
-writes `outbox/<stem>.speakers.json` mapping diarized labels to people:
+writes `outbox/<stem>.speakers.json` mapping the diarized labels to people:
 
 ```json
 { "speakers": {
@@ -105,12 +130,17 @@ writes `outbox/<stem>.speakers.json` mapping diarized labels to people:
 } }
 ```
 
-CPU-only (resemblyzer), reusing the FLAC already made. A speaker is tagged only when its
-best match is ≥ `SPEAKER_MIN_SIM` (default 0.70), assigned **1:1** so one person can't be
-tagged on two speakers. It **never edits** the `.md/.srt/.txt/.json` — names live only in
-`.speakers.json`. See `refs/README.md` to enroll voices.
+- 🧠 CPU-only (resemblyzer), reusing the FLAC the orchestrator already made — no extra GPU.
+- 🎯 A speaker is tagged only when its best match is ≥ `SPEAKER_MIN_SIM` (default 0.70),
+  assigned **1:1** so one person can't be tagged on two speakers. Each file reports the
+  similarity so you can tune the cutoff.
+- ✋ It **never edits** the `.md/.srt/.txt/.json` — names live only in `.speakers.json`.
 
-## Configuration (`.env`)
+See [`refs/README.md`](refs/README.md) to enroll voices.
+
+## Configuration
+
+All via `.env` (copy from `.env.example`):
 
 | Var | Default | Notes |
 |-----|---------|-------|
@@ -135,20 +165,34 @@ diarize-batch/
 └── docker-compose.yml # orchestrator + fileserver + watchdog
 ```
 
+> `.env`, `secrets/`, and `refs/` are **gitignored** — they hold your keys and private
+> audio and never belong in the repo.
+
+## Roadmap
+
+- [ ] **Fully-local inference.** An optional offline backend that runs WhisperX + pyannote
+  on your own GPU (or a box on your LAN) instead of RunPod — zero cloud, zero per-meeting
+  cost. The orchestrator already talks to the worker over a small HTTP contract, so the
+  GPU backend is designed to be swappable.
+- [ ] **Meeting intelligence.** Turn transcripts into structured outputs — summaries,
+  action items, decisions, and follow-ups — generated locally alongside the raw transcript.
+
 ## Notes
+
 - **Cost** ≈ $0.10–0.30 per meeting on a cheap 16–24 GB GPU; **$0 when idle**. The first
   job after idle pays a ~2–5 min pod cold-boot; transcription itself is ~40–50× real-time.
 - **Restart-safe:** a container restart mid-job leaves the input in `inbox/` (only
   archived on success) to re-run; a `watchdog` container kills an orphaned pod if the
   orchestrator dies.
-- `.env`, `secrets/`, and `refs/` are **gitignored** — they hold your keys and private
-  audio and never belong in the repo.
 
-## Roadmap
+## Acknowledgments
 
-- **Fully-local inference.** An optional offline backend that runs WhisperX + pyannote
-  on your own GPU (or a box on your LAN) instead of RunPod — zero cloud, zero per-meeting
-  cost. The orchestrator already talks to the worker over a small HTTP contract, so the
-  GPU backend is designed to be swappable.
-- **Meeting intelligence.** Turn transcripts into structured outputs — summaries, action
-  items, decisions, and follow-ups — generated locally alongside the raw transcript.
+- [WhisperX](https://github.com/m-bain/whisperX) — word-level transcription on the worker.
+- [pyannote.audio](https://github.com/pyannote/pyannote-audio) — speaker diarization.
+- [Resemblyzer](https://github.com/resemble-ai/Resemblyzer) — the CPU voice embeddings behind speaker-id.
+- [RunPod](https://runpod.io) — the on-demand GPU.
+- Built for the [Meetily](https://github.com/Zackriya-Solutions/meetily) recording workflow.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=kimwwk/diarize-batch&type=Date)](https://star-history.com/#kimwwk/diarize-batch&Date)
