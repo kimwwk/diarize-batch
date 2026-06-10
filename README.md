@@ -143,3 +143,12 @@ diarize-batch/
   orchestrator dies.
 - `.env`, `secrets/`, and `refs/` are **gitignored** — they hold your keys and private
   audio and never belong in the repo.
+
+## Roadmap
+
+- **Fully-local inference.** An optional offline backend that runs WhisperX + pyannote
+  on your own GPU (or a box on your LAN) instead of RunPod — zero cloud, zero per-meeting
+  cost. The orchestrator already talks to the worker over a small HTTP contract, so the
+  GPU backend is designed to be swappable.
+- **Meeting intelligence.** Turn transcripts into structured outputs — summaries, action
+  items, decisions, and follow-ups — generated locally alongside the raw transcript.
