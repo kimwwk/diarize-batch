@@ -56,22 +56,23 @@ only while it's actually transcribing.
 
 ## How it works
 
-```
-  add audio.mp4   (web upload :8080  ·  or  cp into inbox/)
-        │
-        ▼
-  ┌──────────────────────────────┐   SSH tunnel    ┌─────────────────────────────┐
-  │  orchestrator  (your box)     │   (key-gated)   │  RunPod GPU pod (on-demand)  │
-  │  watch inbox, one at a time   │ ──────────────► │  WhisperX large-v3 +         │
-  │  ffmpeg → 16k mono FLAC        │   POST FLAC     │  pyannote diarization        │
-  │  boot pod → tunnel → infer     │ ◄────────────── │  → [{start,end,speaker,text}]│
-  │  render → tag speakers → clean │    segments     └─────────────────────────────┘
-  │  write .md/.srt/.txt/.json     │          (pod deleted after POD_IDLE_MINUTES)
-  └──────────────────────────────┘
-        │
-        ▼
-  transcripts stay here (outbox/, served at :8080) — the pod, and the audio on it,
-  are destroyed after each idle period
+```mermaid
+flowchart TD
+    A["📥 add audio.mp4<br/>web upload :8080 · or cp into inbox/"] --> O
+
+    subgraph yourbox["🏠 your box"]
+        O["<b>orchestrator</b><br/>watch inbox, one at a time<br/>ffmpeg → 16 kHz mono FLAC<br/>boot pod → tunnel → infer<br/>render → tag speakers → clean up"]
+        T["📄 transcripts stay here<br/>outbox/ — .md .srt .txt .json<br/>served at :8080"]
+    end
+
+    subgraph runpod["☁️ RunPod GPU pod (on-demand)"]
+        P["WhisperX large-v3<br/>+ pyannote diarization"]
+    end
+
+    O -- "POST FLAC<br/>SSH tunnel (key-gated)" --> P
+    P -- "segments<br/>{start, end, speaker, text}" --> O
+    O --> T
+    P -.-> D["💥 pod deleted after POD_IDLE_MINUTES<br/>audio destroyed with it"]
 ```
 
 A small always-on **orchestrator** container watches a folder. When a file lands it
