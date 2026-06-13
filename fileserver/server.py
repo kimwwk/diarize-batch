@@ -21,6 +21,10 @@ Routes
                             empty/whitespace name deletes the row. This is the
                             additive override layer the viewer shows on top of
                             the auto voice-match — it never edits the transcript.
+  GET  /roster/<stem>    -> JSON list of every speaker in a meeting with its
+                            resolved display name (manual > voice-match > "Speaker
+                            N"), source, and talk-time. The "see all speakers"
+                            API; also what the viewer's mapping panel shows.
   PUT  /upload/<name>    -> stream the request body into INBOX, atomically:
                             writes INBOX/.<name>.part, then os.replace() to
                             INBOX/<name>. The orchestrator skips dotfiles, so it
@@ -126,6 +130,58 @@ def set_name(meeting, speaker_raw, name):
                 (meeting, speaker_raw))
         conn.commit()
     return name
+
+
+def _label(raw):
+    """Cosmetic 'Speaker N' from a raw 'SPEAKER_xx' label (mirror render.py)."""
+    if not raw or raw == "UNKNOWN":
+        return "Unknown"
+    m = re.fullmatch(r"SPEAKER_(\d+)", raw)
+    return f"Speaker {int(m.group(1)) + 1}" if m else raw
+
+
+def roster_for(stem):
+    """Every speaker in a meeting with its resolved display name. Merges the
+    three layers the viewer uses — manual DB name > auto voice-match > Speaker N
+    — plus talk-time, so one call answers 'who is in this meeting and what are
+    they called'. Returns None if the transcript JSON is missing."""
+    jpath = os.path.join(OUTBOX, stem + ".json")
+    if not os.path.isfile(jpath):
+        return None
+    with open(jpath, encoding="utf-8") as fh:
+        data = json.load(fh)
+    order, secs, nseg = [], {}, {}
+    for s in data.get("segments", []):
+        spk = s.get("speaker") or "UNKNOWN"
+        if spk not in secs:
+            order.append(spk)
+            secs[spk] = 0.0
+            nseg[spk] = 0
+        secs[spk] += max(0.0, float(s.get("end", 0)) - float(s.get("start", 0)))
+        nseg[spk] += 1
+
+    auto = {}
+    spath = os.path.join(OUTBOX, stem + ".speakers.json")
+    if os.path.isfile(spath):
+        try:
+            with open(spath, encoding="utf-8") as fh:
+                for info in (json.load(fh).get("speakers") or {}).values():
+                    if info.get("matched") and info.get("raw"):
+                        auto[info["raw"]] = info["name"]
+        except Exception:  # noqa: BLE001
+            pass
+
+    manual = names_for(stem)
+    roster = []
+    for spk in order:
+        name = manual.get(spk) or auto.get(spk) or _label(spk)
+        source = "manual" if spk in manual else ("voice" if spk in auto else "none")
+        roster.append({
+            "raw": spk, "label": _label(spk), "name": name, "source": source,
+            "seconds": round(secs[spk], 1), "segments": nseg[spk],
+        })
+    roster.sort(key=lambda r: -r["seconds"])
+    return roster
 
 PAGE = """<!doctype html>
 <html lang="en"><head>
@@ -235,18 +291,29 @@ VIEWER = """<!doctype html>
           font: 600 12px/22px system-ui; text-align: center; }
   .who b { font-size: 13.5px; }
   .who b.named { color: #2a8; }
-  .edit { font-size: 12px; color: #888; cursor: pointer; border: 0;
-          background: none; padding: 0 .15rem; opacity: .55; }
-  .edit:hover { opacity: 1; color: #4a9; }
-  .who input { font: inherit; font-size: 13.5px; padding: .05rem .35rem;
-               border: 1px solid #4a9; border-radius: 6px; background: transparent;
-               color: inherit; width: 12rem; max-width: 50vw; }
-  .who .save, .who .cancel { font: 12px ui-monospace, monospace; cursor: pointer;
-        border: 1px solid #8886; border-radius: 6px; background: transparent;
-        color: inherit; padding: .15rem .45rem; }
-  .who .save:hover { border-color: #4a9; color: #4a9; }
   .ts { font: 12px ui-monospace, monospace; color: #4a9; cursor: pointer;
         text-decoration: underline; }
+  /* speaker mapping panel */
+  #rosterwrap summary { cursor: pointer; font: 12px ui-monospace, monospace;
+        color: #888; padding: .15rem 0; }
+  #rosterwrap .hint { opacity: .7; }
+  #roster { display: flex; flex-wrap: wrap; gap: .4rem; margin: .5rem 0 .2rem; }
+  .rpill { display: inline-flex; align-items: center; gap: .35rem;
+           border: 1px solid #8884; border-radius: 999px;
+           padding: .12rem .55rem .12rem .2rem; }
+  .rpill .chip { width: 20px; height: 20px; border-radius: 50%;
+                 font: 600 11px/20px system-ui; }
+  .rname { font-size: 13px; cursor: pointer; }
+  .rname:hover { color: #4a9; text-decoration: underline; }
+  .rname.named { color: #2a8; }
+  .rsrc { font: 10px ui-monospace, monospace; color: #888; }
+  .rpill input { font: inherit; font-size: 13px; padding: .05rem .35rem; width: 9rem;
+                 max-width: 40vw; border: 1px solid #4a9; border-radius: 6px;
+                 background: transparent; color: inherit; }
+  .rpill .save, .rpill .cancel { font: 12px ui-monospace, monospace; cursor: pointer;
+        border: 1px solid #8886; border-radius: 6px; background: transparent;
+        color: inherit; padding: .05rem .4rem; }
+  .rpill .save:hover { border-color: #4a9; color: #4a9; }
   .turn p { margin: 0 0 0 30px; }
   .seg { cursor: pointer; border-radius: 4px; }
   .seg:hover { background: rgba(74,170,153,.13); }
@@ -260,6 +327,10 @@ VIEWER = """<!doctype html>
   <div class="head"><a class="back" href="/">&larr; transcripts</a>
     <h1 id="title">&hellip;</h1><span id="meta"></span></div>
   <div id="audiowrap"><audio id="player" controls preload="metadata"></audio></div>
+  <details id="rosterwrap" open>
+    <summary>Speakers &mdash; <span id="rcount"></span> <span class="hint">(click a name to edit the mapping)</span></summary>
+    <div id="roster"></div>
+  </details>
   <div id="find">
     <input id="q" type="search" placeholder="Search transcript&hellip;" autocomplete="off">
     <span id="count"></span>
@@ -276,9 +347,11 @@ const list = document.getElementById('list');
 const state = document.getElementById('state');
 const q = document.getElementById('q');
 const countEl = document.getElementById('count');
+const roster = document.getElementById('roster');
+const rcount = document.getElementById('rcount');
 const PALETTE = ['#3aa087', '#5b8def', '#c98a4b', '#a06ee0',
                  '#7da33c', '#d4647c', '#4aa0b5', '#b08f3e'];
-let segs = [], marks = [], cur = -1, canPlay = true, lastSeg = -1;
+let segs = [], marks = [], cur = -1, canPlay = true, lastSeg = -1, speakerOrder = [];
 // name layers, both keyed by raw diarizer label (SPEAKER_07):
 //   auto   = voice-match from <stem>.speakers.json (read-only)
 //   manual = human edits stored in the SQLite name map (editable here)
@@ -310,22 +383,24 @@ audio.src = '/audio/' + encodeURIComponent(STEM);
 const displayName = raw => manual[raw] || auto[raw] || label(raw);
 const isNamed = raw => Boolean(manual[raw] || auto[raw]);
 
+// turn headers are read-only; all naming happens in the mapping panel
 function whoInner(raw, t) {
   const name = displayName(raw);
   return '<span class="chip" style="background:' + (colors[raw] || '#888') + '">' +
     esc(name[0].toUpperCase()) + '</span>' +
     '<b class="name' + (isNamed(raw) ? ' named' : '') + '">' + esc(name) + '</b>' +
-    '<button class="edit" title="rename speaker">&#9998;</button>' +
     (t != null ? '<span class="ts" data-t="' + t + '">' + fmtTs(t) + '</span>' : '');
 }
 
 function render() {
   let ci = 0, html = '', lastSpk = null;
+  speakerOrder = [];
   segs.forEach((s, i) => {
     const spk = s.speaker || 'UNKNOWN';
     if (spk !== lastSpk) {
       if (lastSpk !== null) html += '</p></div>';
-      if (!(spk in colors)) colors[spk] = PALETTE[ci++ % PALETTE.length];
+      if (!(spk in colors)) { colors[spk] = PALETTE[ci++ % PALETTE.length]; }
+      if (!speakerOrder.includes(spk)) speakerOrder.push(spk);
       html += '<div class="turn" data-spk="' + esc(spk) + '" data-t="' + s.start +
         '"><div class="who">' + whoInner(spk, s.start) + '</div><p>';
       lastSpk = spk;
@@ -336,12 +411,78 @@ function render() {
   list.innerHTML = html;
 }
 
-// repaint every turn header for one speaker after its name changes
-function refreshSpeaker(raw) {
+// --- speaker mapping panel ------------------------------------------------
+function rpillInner(raw) {
+  const name = displayName(raw);
+  const src = manual[raw] ? '' : (auto[raw] ? ' <span class="rsrc">(voice)</span>' : '');
+  return '<span class="chip" style="background:' + (colors[raw] || '#888') + '">' +
+    esc(name[0].toUpperCase()) + '</span>' +
+    '<span class="rname' + (isNamed(raw) ? ' named' : '') +
+    '" title="' + esc(label(raw)) + '">' + esc(name) + '</span>' + src;
+}
+
+function buildRoster() {
+  roster.innerHTML = speakerOrder.map(raw =>
+    '<span class="rpill" data-spk="' + esc(raw) + '">' + rpillInner(raw) + '</span>'
+  ).join('');
+  rcount.textContent = speakerOrder.length;
+}
+
+// repaint a speaker everywhere its name appears (turns + mapping pill)
+function repaint(raw) {
   list.querySelectorAll('.turn[data-spk="' + CSS.escape(raw) + '"]').forEach(turn => {
     turn.querySelector('.who').innerHTML = whoInner(raw, Number(turn.dataset.t));
   });
+  const pill = roster.querySelector('.rpill[data-spk="' + CSS.escape(raw) + '"]');
+  if (pill) pill.innerHTML = rpillInner(raw);
 }
+
+// persist one name to the SQLite map; '' clears it (reverts to voice/Speaker N)
+async function saveName(raw, value) {
+  const name = (value || '').trim();
+  const r = await fetch('/names/' + encodeURIComponent(STEM), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ speaker_raw: raw, name }),
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const data = await r.json();
+  if (data.name) manual[raw] = data.name; else delete manual[raw];
+}
+
+function editPill(pill) {
+  const raw = pill.dataset.spk;
+  pill.innerHTML =
+    '<span class="chip" style="background:' + (colors[raw] || '#888') + '"></span>' +
+    '<input type="text" maxlength="80"> ' +
+    '<button class="save">save</button> <button class="cancel">cancel</button>';
+  const inp = pill.querySelector('input');
+  inp.value = manual[raw] || '';
+  inp.placeholder = auto[raw] || label(raw);
+  inp.focus();
+  inp.select();
+  inp.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); commitPill(pill); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); pill.innerHTML = rpillInner(raw); }
+  });
+}
+
+async function commitPill(pill) {
+  const raw = pill.dataset.spk, inp = pill.querySelector('input');
+  if (!inp) return;
+  inp.disabled = true;
+  try { await saveName(raw, inp.value); }
+  catch (err) { alert('Could not save name: ' + err); }
+  repaint(raw);
+}
+
+roster.addEventListener('click', e => {
+  const pill = e.target.closest('.rpill');
+  if (!pill) return;
+  if (e.target.closest('.save')) { commitPill(pill); return; }
+  if (e.target.closest('.cancel')) { pill.innerHTML = rpillInner(pill.dataset.spk); return; }
+  if (e.target.closest('input')) return;          // typing — ignore
+  if (!pill.querySelector('input')) editPill(pill);  // any other click opens the editor
+});
 
 async function load() {
   const resp = await fetch('/' + encodeURIComponent(STEM) + '.json');
@@ -365,6 +506,7 @@ async function load() {
   segs = (data.segments || []).filter(s => (s.text || '').trim());
   if (!segs.length) { state.textContent = 'empty transcript'; return; }
   render();
+  buildRoster();
   state.remove();
 }
 
@@ -373,56 +515,12 @@ function seek(t) {
   audio.currentTime = t;
   audio.play();
 }
+// turn headers are read-only now; clicks just seek the audio
 list.addEventListener('click', e => {
-  if (e.target.closest('.edit')) { startEdit(e.target.closest('.turn')); return; }
-  if (e.target.closest('.save')) { commitEdit(e.target.closest('.turn')); return; }
-  if (e.target.closest('.cancel')) {
-    refreshSpeaker(e.target.closest('.turn').dataset.spk); return;
-  }
-  if (e.target.closest('.who')) return;  // don't seek when fiddling with the header
   const seg = e.target.closest('.seg'), ts = e.target.closest('.ts');
-  if (seg) seek(segs[Number(seg.dataset.i)].start);
-  else if (ts) seek(Number(ts.dataset.t));
+  if (ts) seek(Number(ts.dataset.t));
+  else if (seg) seek(segs[Number(seg.dataset.i)].start);
 });
-
-// inline rename: swap this speaker's header for an input; saving writes the
-// SQLite name map via POST /names/<stem> and repaints every turn for the speaker.
-function startEdit(turn) {
-  const raw = turn.dataset.spk, who = turn.querySelector('.who');
-  who.innerHTML =
-    '<span class="chip" style="background:' + (colors[raw] || '#888') + '"></span>' +
-    '<input type="text" maxlength="80"> ' +
-    '<button class="save">save</button> <button class="cancel">cancel</button>';
-  const inp = who.querySelector('input');
-  inp.value = manual[raw] || '';
-  inp.placeholder = auto[raw] || label(raw);
-  inp.focus();
-  inp.select();
-  inp.addEventListener('keydown', ev => {
-    if (ev.key === 'Enter') { ev.preventDefault(); commitEdit(turn); }
-    else if (ev.key === 'Escape') { ev.preventDefault(); refreshSpeaker(raw); }
-  });
-}
-
-async function commitEdit(turn) {
-  const raw = turn.dataset.spk, inp = turn.querySelector('.who input');
-  if (!inp) return;
-  const name = inp.value.trim();
-  inp.disabled = true;
-  try {
-    const r = await fetch('/names/' + encodeURIComponent(STEM), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ speaker_raw: raw, name }),
-    });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    if (data.name) manual[raw] = data.name; else delete manual[raw];
-  } catch (err) {
-    alert('Could not save name: ' + err);
-  }
-  refreshSpeaker(raw);  // repaint from the (updated) manual map
-}
 
 audio.addEventListener('timeupdate', () => {
   const t = audio.currentTime;
@@ -523,6 +621,9 @@ class Handler(SimpleHTTPRequestHandler):
         m = re.match(r"^/names/([^/]+)$", path)
         if m:
             return self._names_get(urllib.parse.unquote(m.group(1)))
+        m = re.match(r"^/roster/([^/]+)$", path)
+        if m:
+            return self._roster_get(urllib.parse.unquote(m.group(1)))
         return super().do_GET()
 
     def do_HEAD(self):
@@ -576,6 +677,15 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(500, {"error": str(exc)})
         self.log_message("name %s/%s -> %r", stem, speaker, name)
         return self._json(200, {"ok": True, "speaker_raw": speaker, "name": name})
+
+    def _roster_get(self, raw):
+        stem = safe_name(raw)
+        if not stem:
+            return self._json(400, {"error": "bad name"})
+        roster = roster_for(stem)
+        if roster is None:
+            return self._json(404, {"error": "no transcript JSON for that name"})
+        return self._json(200, {"stem": stem, "roster": roster})
 
     def _audio(self, raw, head=False):
         """Serve DONE_DIR/<stem>.<any audio ext> with HTTP Range support, so the
