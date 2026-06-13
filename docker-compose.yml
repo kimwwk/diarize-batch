@@ -15,9 +15,11 @@ services:
 
   # Upload + serve frontend:
   #   GET  http://<host>:8080/            -> drag-and-drop upload box + transcript list
+  #   GET  http://<host>:8080/view/<stem> -> interactive viewer: search + click-to-play
   #   GET  http://<host>:8080/<name>.md   -> the transcript (.json/.srt/.txt too)
+  #   GET  http://<host>:8080/audio/<stem> -> archived source audio (Range-capable)
   #   PUT  http://<host>:8080/upload/<name> -> drops audio straight into inbox/
-  # outbox is mounted read-only (can't be overwritten); only inbox/ is writable.
+  # outbox/done are mounted read-only (can't be overwritten); only inbox/ is writable.
   diarize-fileserver:
     image: python:3.12-slim
     container_name: diarize-fileserver
@@ -26,6 +28,7 @@ services:
     environment:
       OUTBOX_DIR: /data/outbox
       INBOX_DIR: /data/inbox
+      DONE_DIR: /data/done
       PORT: "8080"
       MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-2048}"
       AUDIO_EXTS: "${AUDIO_EXTS:-}"      # blank -> server.py's built-in default
@@ -33,6 +36,7 @@ services:
     volumes:
       - ./fileserver/server.py:/app/server.py:ro
       - ${DATA_DIR:-./data}/outbox:/data/outbox:ro
+      - ${DATA_DIR:-./data}/done:/data/done:ro
       - ${DATA_DIR:-./data}/inbox:/data/inbox
     ports:
       - "${LINKS_PORT:-8080}:8080"
