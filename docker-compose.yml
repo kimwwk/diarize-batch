@@ -29,6 +29,7 @@ services:
       OUTBOX_DIR: /data/outbox
       INBOX_DIR: /data/inbox
       DONE_DIR: /data/done
+      DB_DIR: /data/db
       PORT: "8080"
       MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-2048}"
       AUDIO_EXTS: "${AUDIO_EXTS:-}"      # blank -> server.py's built-in default
@@ -38,6 +39,7 @@ services:
       - ${DATA_DIR:-./data}/outbox:/data/outbox:ro
       - ${DATA_DIR:-./data}/done:/data/done:ro
       - ${DATA_DIR:-./data}/inbox:/data/inbox
+      - ${DATA_DIR:-./data}/db:/data/db    # SQLite speaker name map (read-write)
     ports:
       - "${LINKS_PORT:-8080}:8080"
 

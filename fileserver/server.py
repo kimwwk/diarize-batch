@@ -15,6 +15,12 @@ Routes
   GET  /audio/<stem>     -> the archived source audio from DONE_DIR (the
                             orchestrator moves processed inputs there), served
                             with HTTP Range support so the player can seek.
+  GET  /names/<stem>     -> JSON {raw_speaker_label: name} of the HUMAN name map
+                            for one meeting, read from the SQLite DB.
+  POST /names/<stem>     -> upsert one mapping (body {"speaker_raw","name"}); an
+                            empty/whitespace name deletes the row. This is the
+                            additive override layer the viewer shows on top of
+                            the auto voice-match — it never edits the transcript.
   PUT  /upload/<name>    -> stream the request body into INBOX, atomically:
                             writes INBOX/.<name>.part, then os.replace() to
                             INBOX/<name>. The orchestrator skips dotfiles, so it
@@ -28,12 +34,19 @@ import html
 import json
 import os
 import re
+import sqlite3
+import time
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 OUTBOX = os.environ.get("OUTBOX_DIR", "/data/outbox")
 INBOX = os.environ.get("INBOX_DIR", "/data/inbox")
 DONE = os.environ.get("DONE_DIR", "/data/done")
+# SQLite name map: one (meeting, speaker_raw) -> human name. Additive override
+# layer the viewer renders on top of the auto voice-match; never touches the
+# transcript. Shared with tools/names.py + tools/enroll.py over the data volume.
+DB_DIR = os.environ.get("DB_DIR", "/data/db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(DB_DIR, "speakers.db"))
 PORT = int(os.environ.get("PORT", "8080"))
 MAX_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "2048")) * 1024 * 1024
 # Optional shared secret. If set, PUT /upload requires ?token=... (or an
@@ -55,6 +68,64 @@ AUDIO_CTYPES = {
     ".ogg": "audio/ogg", ".opus": "audio/ogg", ".webm": "audio/webm",
     ".mkv": "video/x-matroska",
 }
+
+
+# --- name-map database ----------------------------------------------------
+# Tiny SQLite store, schema shared with tools/names.py + tools/enroll.py.
+# Keyed by the raw diarizer label (SPEAKER_07) — stable across re-renders,
+# unlike the cosmetic "Speaker 8". WAL mode so a UI write and an ssh/CLI read
+# don't block each other.
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS speaker_names (
+    meeting      TEXT NOT NULL,
+    speaker_raw  TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (meeting, speaker_raw)
+);
+"""
+
+
+def _db():
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def db_init():
+    os.makedirs(DB_DIR, exist_ok=True)
+    with _db() as conn:
+        conn.executescript(SCHEMA)
+
+
+def names_for(meeting):
+    """{speaker_raw: name} for one meeting."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT speaker_raw, name FROM speaker_names WHERE meeting=?",
+            (meeting,)).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def set_name(meeting, speaker_raw, name):
+    """Upsert, or delete the row when name is blank. Returns the new name ('' if
+    cleared)."""
+    name = (name or "").strip()
+    with _db() as conn:
+        if name:
+            conn.execute(
+                "INSERT INTO speaker_names (meeting, speaker_raw, name, updated_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(meeting, speaker_raw) "
+                "DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at",
+                (meeting, speaker_raw, name,
+                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
+        else:
+            conn.execute(
+                "DELETE FROM speaker_names WHERE meeting=? AND speaker_raw=?",
+                (meeting, speaker_raw))
+        conn.commit()
+    return name
 
 PAGE = """<!doctype html>
 <html lang="en"><head>
@@ -163,6 +234,17 @@ VIEWER = """<!doctype html>
   .chip { width: 22px; height: 22px; border-radius: 6px; color: #fff; flex: none;
           font: 600 12px/22px system-ui; text-align: center; }
   .who b { font-size: 13.5px; }
+  .who b.named { color: #2a8; }
+  .edit { font-size: 12px; color: #888; cursor: pointer; border: 0;
+          background: none; padding: 0 .15rem; opacity: .55; }
+  .edit:hover { opacity: 1; color: #4a9; }
+  .who input { font: inherit; font-size: 13.5px; padding: .05rem .35rem;
+               border: 1px solid #4a9; border-radius: 6px; background: transparent;
+               color: inherit; width: 12rem; max-width: 50vw; }
+  .who .save, .who .cancel { font: 12px ui-monospace, monospace; cursor: pointer;
+        border: 1px solid #8886; border-radius: 6px; background: transparent;
+        color: inherit; padding: .15rem .45rem; }
+  .who .save:hover { border-color: #4a9; color: #4a9; }
   .ts { font: 12px ui-monospace, monospace; color: #4a9; cursor: pointer;
         text-decoration: underline; }
   .turn p { margin: 0 0 0 30px; }
@@ -197,6 +279,11 @@ const countEl = document.getElementById('count');
 const PALETTE = ['#3aa087', '#5b8def', '#c98a4b', '#a06ee0',
                  '#7da33c', '#d4647c', '#4aa0b5', '#b08f3e'];
 let segs = [], marks = [], cur = -1, canPlay = true, lastSeg = -1;
+// name layers, both keyed by raw diarizer label (SPEAKER_07):
+//   auto   = voice-match from <stem>.speakers.json (read-only)
+//   manual = human edits stored in the SQLite name map (editable here)
+// display precedence: manual > auto > "Speaker N".
+let auto = {}, manual = {}, colors = {};
 
 const esc = s => s.replace(/[&<>"]/g,
   c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
@@ -219,26 +306,41 @@ audio.addEventListener('error', () => {
 });
 audio.src = '/audio/' + encodeURIComponent(STEM);
 
-function render(names) {
-  const colors = {};
+// what to show for a raw speaker label, and whether it's a real (human/auto) name
+const displayName = raw => manual[raw] || auto[raw] || label(raw);
+const isNamed = raw => Boolean(manual[raw] || auto[raw]);
+
+function whoInner(raw, t) {
+  const name = displayName(raw);
+  return '<span class="chip" style="background:' + (colors[raw] || '#888') + '">' +
+    esc(name[0].toUpperCase()) + '</span>' +
+    '<b class="name' + (isNamed(raw) ? ' named' : '') + '">' + esc(name) + '</b>' +
+    '<button class="edit" title="rename speaker">&#9998;</button>' +
+    (t != null ? '<span class="ts" data-t="' + t + '">' + fmtTs(t) + '</span>' : '');
+}
+
+function render() {
   let ci = 0, html = '', lastSpk = null;
   segs.forEach((s, i) => {
     const spk = s.speaker || 'UNKNOWN';
     if (spk !== lastSpk) {
       if (lastSpk !== null) html += '</p></div>';
-      const lbl = label(spk), name = names[lbl] || lbl;
       if (!(spk in colors)) colors[spk] = PALETTE[ci++ % PALETTE.length];
-      html += '<div class="turn"><div class="who">' +
-        '<span class="chip" style="background:' + colors[spk] + '">' +
-        esc(name[0].toUpperCase()) + '</span><b>' + esc(name) + '</b>' +
-        '<span class="ts" data-t="' + s.start + '">' + fmtTs(s.start) + '</span>' +
-        '</div><p>';
+      html += '<div class="turn" data-spk="' + esc(spk) + '" data-t="' + s.start +
+        '"><div class="who">' + whoInner(spk, s.start) + '</div><p>';
       lastSpk = spk;
     }
     html += '<span class="seg" data-i="' + i + '">' + esc(s.text.trim()) + '</span> ';
   });
   if (lastSpk !== null) html += '</p></div>';
   list.innerHTML = html;
+}
+
+// repaint every turn header for one speaker after its name changes
+function refreshSpeaker(raw) {
+  list.querySelectorAll('.turn[data-spk="' + CSS.escape(raw) + '"]').forEach(turn => {
+    turn.querySelector('.who').innerHTML = whoInner(raw, Number(turn.dataset.t));
+  });
 }
 
 async function load() {
@@ -250,16 +352,19 @@ async function load() {
   document.getElementById('meta').textContent =
     [data.date, data.time, data.duration,
      data.speakers && data.speakers + ' speakers'].filter(Boolean).join(' · ');
-  const names = {};
-  try {  // additive speaker-id side file -> show real names where matched
+  try {  // auto layer: voice-match side file -> name by raw label where matched
     const sr = await fetch('/' + encodeURIComponent(STEM) + '.speakers.json');
     if (sr.ok)
-      for (const [lbl, info] of Object.entries((await sr.json()).speakers || {}))
-        if (info.matched) names[lbl] = info.name;
+      for (const info of Object.values((await sr.json()).speakers || {}))
+        if (info.matched && info.raw) auto[info.raw] = info.name;
+  } catch (e) {}
+  try {  // manual layer: human name map from the SQLite DB (keyed by raw)
+    const nr = await fetch('/names/' + encodeURIComponent(STEM));
+    if (nr.ok) manual = (await nr.json()).names || {};
   } catch (e) {}
   segs = (data.segments || []).filter(s => (s.text || '').trim());
   if (!segs.length) { state.textContent = 'empty transcript'; return; }
-  render(names);
+  render();
   state.remove();
 }
 
@@ -269,10 +374,55 @@ function seek(t) {
   audio.play();
 }
 list.addEventListener('click', e => {
+  if (e.target.closest('.edit')) { startEdit(e.target.closest('.turn')); return; }
+  if (e.target.closest('.save')) { commitEdit(e.target.closest('.turn')); return; }
+  if (e.target.closest('.cancel')) {
+    refreshSpeaker(e.target.closest('.turn').dataset.spk); return;
+  }
+  if (e.target.closest('.who')) return;  // don't seek when fiddling with the header
   const seg = e.target.closest('.seg'), ts = e.target.closest('.ts');
   if (seg) seek(segs[Number(seg.dataset.i)].start);
   else if (ts) seek(Number(ts.dataset.t));
 });
+
+// inline rename: swap this speaker's header for an input; saving writes the
+// SQLite name map via POST /names/<stem> and repaints every turn for the speaker.
+function startEdit(turn) {
+  const raw = turn.dataset.spk, who = turn.querySelector('.who');
+  who.innerHTML =
+    '<span class="chip" style="background:' + (colors[raw] || '#888') + '"></span>' +
+    '<input type="text" maxlength="80"> ' +
+    '<button class="save">save</button> <button class="cancel">cancel</button>';
+  const inp = who.querySelector('input');
+  inp.value = manual[raw] || '';
+  inp.placeholder = auto[raw] || label(raw);
+  inp.focus();
+  inp.select();
+  inp.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); commitEdit(turn); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); refreshSpeaker(raw); }
+  });
+}
+
+async function commitEdit(turn) {
+  const raw = turn.dataset.spk, inp = turn.querySelector('.who input');
+  if (!inp) return;
+  const name = inp.value.trim();
+  inp.disabled = true;
+  try {
+    const r = await fetch('/names/' + encodeURIComponent(STEM), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ speaker_raw: raw, name }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    if (data.name) manual[raw] = data.name; else delete manual[raw];
+  } catch (err) {
+    alert('Could not save name: ' + err);
+  }
+  refreshSpeaker(raw);  // repaint from the (updated) manual map
+}
 
 audio.addEventListener('timeupdate', () => {
   const t = audio.currentTime;
@@ -370,6 +520,9 @@ class Handler(SimpleHTTPRequestHandler):
         m = re.match(r"^/audio/([^/]+)$", path)
         if m:
             return self._audio(urllib.parse.unquote(m.group(1)))
+        m = re.match(r"^/names/([^/]+)$", path)
+        if m:
+            return self._names_get(urllib.parse.unquote(m.group(1)))
         return super().do_GET()
 
     def do_HEAD(self):
@@ -377,6 +530,12 @@ class Handler(SimpleHTTPRequestHandler):
         if m:
             return self._audio(urllib.parse.unquote(m.group(1)), head=True)
         return super().do_HEAD()
+
+    def do_POST(self):
+        m = re.match(r"^/names/([^/]+)$", urllib.parse.urlparse(self.path).path)
+        if m:
+            return self._names_post(urllib.parse.unquote(m.group(1)))
+        return self._json(404, {"error": "not found"})
 
     def _viewer(self, raw):
         stem = safe_name(raw)
@@ -386,6 +545,37 @@ class Handler(SimpleHTTPRequestHandler):
         # filename can't close the <script> tag.
         body = VIEWER.replace("{{STEM}}", json.dumps(stem).replace("<", "\\u003c"))
         self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
+    # --- name map --------------------------------------------------------
+    def _names_get(self, raw):
+        stem = safe_name(raw)
+        if not stem:
+            return self._json(400, {"error": "bad name"})
+        try:
+            return self._json(200, {"names": names_for(stem)})
+        except Exception as exc:  # noqa: BLE001
+            return self._json(500, {"error": str(exc)})
+
+    def _names_post(self, raw):
+        stem = safe_name(raw)
+        if not stem:
+            return self._json(400, {"error": "bad name"})
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 1 << 16:
+            return self._json(400, {"error": "missing or oversized body"})
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            speaker = str(payload["speaker_raw"]).strip()
+            if not speaker:
+                raise ValueError("speaker_raw required")
+        except Exception as exc:  # noqa: BLE001
+            return self._json(400, {"error": f"bad request: {exc}"})
+        try:
+            name = set_name(stem, speaker, payload.get("name", ""))
+        except Exception as exc:  # noqa: BLE001
+            return self._json(500, {"error": str(exc)})
+        self.log_message("name %s/%s -> %r", stem, speaker, name)
+        return self._json(200, {"ok": True, "speaker_raw": speaker, "name": name})
 
     def _audio(self, raw, head=False):
         """Serve DONE_DIR/<stem>.<any audio ext> with HTTP Range support, so the
@@ -548,6 +738,8 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    db_init()
     print(f"[fileserver] serving {OUTBOX} + upload->{INBOX} on :{PORT}"
+          f" | name-db {DB_PATH}"
           f"{' (token required)' if UPLOAD_TOKEN else ''}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

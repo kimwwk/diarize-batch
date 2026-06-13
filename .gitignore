@@ -39,3 +39,22 @@ secrets/
 # speaker-id reference voices (private audio — never commit); keep the README
 refs/*
 !refs/README.md
+
+# raw meeting audio — never commit any recording, anywhere in the tree
+# (data/ and refs/ are already covered above; this also catches loose files
+#  dropped in the project root or elsewhere)
+*.m4a
+*.mp4
+*.wav
+*.flac
+*.mp3
+*.aac
+*.ogg
+*.webm
+*.opus
+*.mkv
+
+# SQLite name-map database (private speaker names — lives only on the instance)
+*.db
+*.db-wal
+*.db-shm
