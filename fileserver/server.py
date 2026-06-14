@@ -25,6 +25,12 @@ Routes
                             resolved display name (manual > voice-match > "Speaker
                             N"), source, and talk-time. The "see all speakers"
                             API; also what the viewer's mapping panel shows.
+  GET  /reflection/<stem>-> JSON {"exists","html"} for a hand-authored reflection
+                            note attached to a transcript by stem (drop
+                            OUTBOX/<stem>.reflection.md). The raw .md is kept
+                            verbatim; html is a rendered copy. Always 200 — no
+                            reflection just means exists=false, so a transcript
+                            without one renders exactly as before, no panel.
   PUT  /upload/<name>    -> stream the request body into INBOX, atomically:
                             writes INBOX/.<name>.part, then os.replace() to
                             INBOX/<name>. The orchestrator skips dotfiles, so it
@@ -183,6 +189,129 @@ def roster_for(stem):
     roster.sort(key=lambda r: -r["seconds"])
     return roster
 
+
+# --- reflections ----------------------------------------------------------
+# A reflection is a hand-authored Markdown note attached to one transcript by
+# stem: drop OUTBOX/<stem>.reflection.md and the viewer shows it in a side
+# panel beside the turns. The file on disk is the source of truth and is kept
+# verbatim; we only render a copy to HTML for display. Absence is normal —
+# reflection_html() returns None and the viewer simply shows no panel.
+def reflection_path(stem):
+    return os.path.join(OUTBOX, stem + ".reflection.md")
+
+
+def _md_inline(text):
+    """Inline Markdown -> HTML on an already HTML-escaped string. Order matters:
+    code spans first (so their contents aren't touched), then links, then
+    bold/italic. Stdlib only — no external markdown dependency."""
+    # `code` spans -> <code>…</code> (contents left as-is, already escaped)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    # [label](url) -> anchor; only http/https/relative, no javascript: etc.
+    def _link(m):
+        label, url = m.group(1), m.group(2).strip()
+        if not re.match(r"^(https?:|/|\.|#|mailto:)", url, re.I):
+            return m.group(0)
+        return f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>'
+    text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link, text)
+    # **bold** then *italic* / _italic_
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", text)
+    text = re.sub(r"(?<!\w)_([^_\n]+)_(?!\w)", r"<em>\1</em>", text)
+    return text
+
+
+def md_to_html(text):
+    """Minimal, safe Markdown -> HTML. Everything is HTML-escaped first, so the
+    output can't inject markup; we then re-introduce only a known set of tags
+    (headings, lists, blockquotes, code, paragraphs, inline emphasis/links).
+    Good enough for hand-written reflection notes; keeps the raw .md verbatim."""
+    out, para, list_stack, in_code = [], [], [], False
+    code_buf = []
+
+    def flush_para():
+        if para:
+            out.append("<p>" + _md_inline("<br>".join(para)) + "</p>")
+            para.clear()
+
+    def close_lists(to_depth=0):
+        while len(list_stack) > to_depth:
+            out.append("</" + list_stack.pop() + ">")
+
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = html.escape(raw_line)
+
+        # fenced code blocks ```
+        if raw_line.strip().startswith("```"):
+            if in_code:
+                out.append("<pre><code>" + "\n".join(code_buf) + "</code></pre>")
+                code_buf, in_code = [], False
+            else:
+                flush_para(); close_lists()
+                in_code = True
+            continue
+        if in_code:
+            code_buf.append(line)
+            continue
+
+        stripped = line.strip()
+        if not stripped:                         # blank line ends a block
+            flush_para(); close_lists()
+            continue
+
+        h = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if h:
+            flush_para(); close_lists()
+            lvl = len(h.group(1))
+            out.append(f"<h{lvl}>" + _md_inline(h.group(2).strip()) + f"</h{lvl}>")
+            continue
+
+        if re.match(r"^(-{3,}|\*{3,}|_{3,})$", stripped):  # horizontal rule
+            flush_para(); close_lists()
+            out.append("<hr>")
+            continue
+
+        bq = re.match(r"^&gt;\s?(.*)$", stripped)   # '>' was escaped to &gt;
+        if bq:
+            flush_para(); close_lists()
+            out.append("<blockquote><p>" + _md_inline(bq.group(1)) + "</p></blockquote>")
+            continue
+
+        # list items — depth by leading spaces (2 spaces per level)
+        m = re.match(r"^(\s*)([-*+]|\d+\.)\s+(.*)$", raw_line)
+        if m:
+            flush_para()
+            depth = len(m.group(1)) // 2 + 1
+            tag = "ol" if m.group(2)[:1].isdigit() else "ul"
+            while len(list_stack) > depth:
+                out.append("</" + list_stack.pop() + ">")
+            while len(list_stack) < depth:
+                out.append("<" + tag + ">")
+                list_stack.append(tag)
+            out.append("<li>" + _md_inline(html.escape(m.group(3))) + "</li>")
+            continue
+
+        close_lists()
+        para.append(stripped)
+
+    if in_code:                                   # unterminated fence
+        out.append("<pre><code>" + "\n".join(code_buf) + "</code></pre>")
+    flush_para(); close_lists()
+    return "\n".join(out)
+
+
+def reflection_html(stem):
+    """Rendered HTML for OUTBOX/<stem>.reflection.md, or None if there is no
+    reflection for this stem (the common case — handled gracefully)."""
+    path = reflection_path(stem)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return md_to_html(fh.read())
+    except Exception:  # noqa: BLE001 — a bad/unreadable file must not break the viewer
+        return None
+
+
 PAGE = """<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -268,6 +397,41 @@ VIEWER = """<!doctype html>
   :root { color-scheme: dark light; }
   body { font: 15px/1.6 system-ui, sans-serif; max-width: 760px; margin: 0 auto;
          padding: 0 1rem 4rem; }
+  /* When a reflection is attached, widen to two columns and put the transcript
+     and the reflection side by side; otherwise the page stays exactly as it was
+     (single 760px column, no panel). */
+  body.has-reflection { max-width: 1180px; }
+  body.has-reflection #cols { display: flex; gap: 1.6rem; align-items: flex-start; }
+  body.has-reflection #main { flex: 1 1 0; min-width: 0; }
+  #reflection { display: none; }
+  body.has-reflection #reflection { display: block; flex: 0 0 360px;
+         max-width: 42%; position: sticky; top: 4.2rem; align-self: flex-start;
+         max-height: calc(100vh - 5rem); overflow: auto;
+         border: 1px solid #8884; border-radius: 12px; padding: .2rem 1.1rem 1rem;
+         background: rgba(127,127,127,.05); }
+  #reflection h2.rtitle { font: 600 .8rem ui-monospace, monospace; color: #888;
+         text-transform: uppercase; letter-spacing: .05em; margin: 1rem 0 .3rem;
+         position: sticky; top: 0; background: Canvas; padding: .4rem 0; }
+  #reflection .rbody { font-size: 14px; }
+  #reflection .rbody h1 { font-size: 1.15rem; }
+  #reflection .rbody h2 { font-size: 1rem; text-transform: none; letter-spacing: 0;
+         color: inherit; margin: 1.1rem 0 .3rem; }
+  #reflection .rbody h3 { font-size: .92rem; margin: .9rem 0 .25rem; }
+  #reflection .rbody blockquote { margin: .6rem 0; padding: .1rem 0 .1rem .8rem;
+         border-left: 3px solid #8886; color: #999; }
+  #reflection .rbody code { font: 12.5px ui-monospace, monospace;
+         background: rgba(127,127,127,.18); padding: .05rem .3rem; border-radius: 4px; }
+  #reflection .rbody pre { background: rgba(127,127,127,.12); padding: .6rem .8rem;
+         border-radius: 8px; overflow: auto; }
+  #reflection .rbody pre code { background: none; padding: 0; }
+  #reflection .rbody a { color: #4a9; }
+  #reflection .rbody li { margin: .15rem 0; }
+  @media (max-width: 860px) {
+    body.has-reflection { max-width: 760px; }
+    body.has-reflection #cols { display: block; }
+    body.has-reflection #reflection { flex: none; max-width: none; position: static;
+           max-height: none; margin-top: 1.5rem; }
+  }
   #bar { position: sticky; top: 0; background: Canvas; padding: .7rem 0 .6rem;
          border-bottom: 1px solid #8884; z-index: 2; }
   #bar .head { display: flex; align-items: baseline; gap: .7rem; flex-wrap: wrap; }
@@ -338,8 +502,16 @@ VIEWER = """<!doctype html>
     <button id="next" title="next match (Enter)">&#9660;</button>
   </div>
 </div>
-<div id="state">loading&hellip;</div>
-<div id="list"></div>
+<div id="cols">
+  <div id="main">
+    <div id="state">loading&hellip;</div>
+    <div id="list"></div>
+  </div>
+  <aside id="reflection">
+    <h2 class="rtitle">Reflection</h2>
+    <div class="rbody"></div>
+  </aside>
+</div>
 <script>
 const STEM = {{STEM}};
 const audio = document.getElementById('player');
@@ -510,6 +682,20 @@ async function load() {
   state.remove();
 }
 
+// Reflection side panel: fetch the (optional) hand-authored note for this stem.
+// The server always answers 200 — {exists:false} just means no panel. Any
+// failure is swallowed so the transcript is never affected (graceful absence).
+async function loadReflection() {
+  try {
+    const r = await fetch('/reflection/' + encodeURIComponent(STEM));
+    if (!r.ok) return;
+    const data = await r.json();
+    if (!data.exists || !data.html) return;     // no reflection -> no panel
+    document.querySelector('#reflection .rbody').innerHTML = data.html;
+    document.body.classList.add('has-reflection');
+  } catch (e) { /* never break the viewer over a reflection */ }
+}
+
 function seek(t) {
   if (!canPlay) return;
   audio.currentTime = t;
@@ -592,6 +778,7 @@ document.getElementById('prev').addEventListener('click', () => step(-1));
 document.getElementById('next').addEventListener('click', () => step(1));
 
 load().catch(err => { state.textContent = 'failed to load: ' + err; });
+loadReflection();
 </script></body></html>"""
 
 
@@ -624,6 +811,9 @@ class Handler(SimpleHTTPRequestHandler):
         m = re.match(r"^/roster/([^/]+)$", path)
         if m:
             return self._roster_get(urllib.parse.unquote(m.group(1)))
+        m = re.match(r"^/reflection/([^/]+)$", path)
+        if m:
+            return self._reflection_get(urllib.parse.unquote(m.group(1)))
         return super().do_GET()
 
     def do_HEAD(self):
@@ -686,6 +876,16 @@ class Handler(SimpleHTTPRequestHandler):
         if roster is None:
             return self._json(404, {"error": "no transcript JSON for that name"})
         return self._json(200, {"stem": stem, "roster": roster})
+
+    def _reflection_get(self, raw):
+        """Reflection note (if any) for one meeting, rendered to HTML. Always
+        200: {"exists": bool, "html": str}. No reflection -> exists=false, the
+        viewer just shows no panel. Never an error, so the page is unaffected."""
+        stem = safe_name(raw)
+        if not stem:
+            return self._json(400, {"error": "bad name"})
+        body = reflection_html(stem)
+        return self._json(200, {"exists": body is not None, "html": body or ""})
 
     def _audio(self, raw, head=False):
         """Serve DONE_DIR/<stem>.<any audio ext> with HTTP Range support, so the
@@ -757,6 +957,8 @@ class Handler(SimpleHTTPRequestHandler):
             if n.startswith(".") or not os.path.isfile(os.path.join(OUTBOX, n)):
                 continue
             if n.endswith(".speakers.json"):  # additive side file, not a format
+                continue
+            if n.endswith(".reflection.md"):  # attached note, shown in the viewer
                 continue
             stem, ext = os.path.splitext(n)
             groups.setdefault(stem, {})[ext.lower()] = n
