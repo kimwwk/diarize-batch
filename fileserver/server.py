@@ -25,11 +25,13 @@ Routes
                             resolved display name (manual > voice-match > "Speaker
                             N"), source, and talk-time. The "see all speakers"
                             API; also what the viewer's mapping panel shows.
-  GET  /note/<stem>      -> JSON {"exists","markdown","html"} for the editable,
-                            hand-authored note attached to a transcript by stem
-                            (NOTES/<stem>.note.md). Always 200 — no note just
-                            means exists=false, so the viewer shows an empty
-                            (still editable) panel.
+  GET  /reflection/<stem>-> JSON {"exists","html"} for the READ-ONLY reflection
+                            (OUTBOX/<stem>.reflection.md) — the substantive note
+                            you review, shown in the first tab of the side panel.
+                            Always 200; no reflection -> exists=false.
+  GET  /note/<stem>      -> JSON {"exists","markdown","html"} for the editable
+                            scratch note (NOTES/<stem>.note.md), the second tab.
+                            Always 200 — no note just means exists=false.
   POST /note/<stem>      -> save the note (body {"markdown":"..."}); a blank body
                             clears it. Writes to the read-write NOTES dir; OUTBOX
                             stays read-only. Requires the transcript to exist.
@@ -347,6 +349,29 @@ def save_note(stem, markdown):
     return note_html(stem)
 
 
+# --- reflections ----------------------------------------------------------
+# A reflection is a hand-authored Markdown note attached to one transcript by
+# stem and READ-ONLY in the viewer (you drop it as OUTBOX/<stem>.reflection.md
+# via scp/import). It's the substantive write-up you review; the viewer shows it
+# in the *first* tab of the side panel. Editable scratch notes are the separate
+# .note.md (see above). Absence is normal — reflection_html() returns None.
+def reflection_path(stem):
+    return os.path.join(OUTBOX, stem + ".reflection.md")
+
+
+def reflection_html(stem):
+    """Rendered HTML for OUTBOX/<stem>.reflection.md, or None if there is none
+    for this stem (handled gracefully — the tab just shows an empty state)."""
+    path = reflection_path(stem)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return md_to_html(fh.read())
+    except Exception:  # noqa: BLE001 — a bad/unreadable file must not break the viewer
+        return None
+
+
 PAGE = """<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -432,51 +457,57 @@ VIEWER = """<!doctype html>
   :root { color-scheme: dark light; }
   body { font: 15px/1.6 system-ui, sans-serif; max-width: 760px; margin: 0 auto;
          padding: 0 1rem 4rem; }
-  /* Notes panel: an editable, hand-authored note per transcript, beside the
-     turns. Always available now (you can add one anytime); empty is fine. */
-  body.has-notes { max-width: 1180px; }
-  body.has-notes #cols { display: flex; gap: 1.6rem; align-items: flex-start; }
-  body.has-notes #main { flex: 1 1 0; min-width: 0; }
-  #notepanel { display: none; }
-  body.has-notes #notepanel { display: block; flex: 0 0 360px;
+  /* Side panel beside the turns: two tabs — Reflection (read-only, shown first,
+     the substantive write-up) and Note (editable scratch). Always present so a
+     note can be added anytime; either tab may be empty. */
+  body.has-panel { max-width: 1180px; }
+  body.has-panel #cols { display: flex; gap: 1.6rem; align-items: flex-start; }
+  body.has-panel #main { flex: 1 1 0; min-width: 0; }
+  #sidepanel { display: none; }
+  body.has-panel #sidepanel { display: block; flex: 0 0 360px;
          max-width: 42%; position: sticky; top: 4.2rem; align-self: flex-start;
          max-height: calc(100vh - 5rem); overflow: auto;
-         border: 1px solid #8884; border-radius: 12px; padding: .2rem 1.1rem 1rem;
+         border: 1px solid #8884; border-radius: 12px; padding: 0 1.1rem 1rem;
          background: rgba(127,127,127,.05); }
-  #notepanel .nhead { display: flex; align-items: center; justify-content: space-between;
-         gap: .5rem; position: sticky; top: 0; background: Canvas;
-         padding: .4rem 0; margin: .6rem 0 .35rem; }
-  #notepanel h2.ntitle { font: 600 .8rem ui-monospace, monospace; color: #888;
-         text-transform: uppercase; letter-spacing: .05em; margin: 0; }
+  #sidepanel .ptabs { display: flex; gap: .3rem; position: sticky; top: 0;
+         background: Canvas; padding: .55rem 0 .45rem; margin-bottom: .4rem;
+         border-bottom: 1px solid #8884; z-index: 1; }
+  .ptab { font: 600 .72rem ui-monospace, monospace; text-transform: uppercase;
+         letter-spacing: .05em; background: transparent; border: 1px solid transparent;
+         border-radius: 7px; color: #888; cursor: pointer; padding: .3rem .7rem; }
+  .ptab:hover { color: #4a9; }
+  .ptab.active { color: inherit; border-color: #8886; background: rgba(127,127,127,.10); }
   .nbtn { font: 12px ui-monospace, monospace; background: transparent;
          border: 1px solid #8886; border-radius: 6px; color: inherit;
          cursor: pointer; padding: .15rem .55rem; }
   .nbtn:hover { border-color: #4a9; color: #4a9; }
-  .nempty { color: #888; font-style: italic; }
-  #notepanel .nbody { font-size: 14px; }
-  #notepanel .nbody h1 { font-size: 1.15rem; }
-  #notepanel .nbody h2 { font-size: 1rem; text-transform: none; letter-spacing: 0;
+  .pempty { color: #888; font-style: italic; }
+  #sidepanel .nhead { display: flex; align-items: center; justify-content: flex-end;
+         gap: .5rem; margin: .1rem 0 .45rem; }
+  #sidepanel .pbody { font-size: 14px; }
+  #sidepanel .pbody h1 { font-size: 1.15rem; }
+  #sidepanel .pbody h2 { font-size: 1rem; text-transform: none; letter-spacing: 0;
          color: inherit; margin: 1.1rem 0 .3rem; }
-  #notepanel .nbody h3 { font-size: .92rem; margin: .9rem 0 .25rem; }
-  #notepanel .nbody blockquote { margin: .6rem 0; padding: .1rem 0 .1rem .8rem;
+  #sidepanel .pbody h3 { font-size: .92rem; margin: .9rem 0 .25rem; }
+  #sidepanel .pbody blockquote { margin: .6rem 0; padding: .1rem 0 .1rem .8rem;
          border-left: 3px solid #8886; color: #999; }
-  #notepanel .nbody code { font: 12.5px ui-monospace, monospace;
+  #sidepanel .pbody code { font: 12.5px ui-monospace, monospace;
          background: rgba(127,127,127,.18); padding: .05rem .3rem; border-radius: 4px; }
-  #notepanel .nbody pre { background: rgba(127,127,127,.12); padding: .6rem .8rem;
+  #sidepanel .pbody pre { background: rgba(127,127,127,.12); padding: .6rem .8rem;
          border-radius: 8px; overflow: auto; }
-  #notepanel .nbody pre code { background: none; padding: 0; }
-  #notepanel .nbody a { color: #4a9; }
-  #notepanel .nbody li { margin: .15rem 0; }
-  #notepanel textarea { width: 100%; box-sizing: border-box; min-height: 48vh;
+  #sidepanel .pbody pre code { background: none; padding: 0; }
+  #sidepanel .pbody a { color: #4a9; }
+  #sidepanel .pbody li { margin: .15rem 0; }
+  #sidepanel textarea { width: 100%; box-sizing: border-box; min-height: 48vh;
          font: 13px/1.5 ui-monospace, monospace; padding: .6rem .7rem;
          border: 1px solid #8886; border-radius: 8px; background: transparent;
          color: inherit; resize: vertical; }
-  #notepanel .nactions { display: flex; align-items: center; gap: .5rem; margin-top: .5rem; }
-  #notepanel .nstatus { font: 12px ui-monospace, monospace; color: #888; }
+  #sidepanel .nactions { display: flex; align-items: center; gap: .5rem; margin-top: .5rem; }
+  #sidepanel .nstatus { font: 12px ui-monospace, monospace; color: #888; }
   @media (max-width: 860px) {
-    body.has-notes { max-width: 760px; }
-    body.has-notes #cols { display: block; }
-    body.has-notes #notepanel { flex: none; max-width: none; position: static;
+    body.has-panel { max-width: 760px; }
+    body.has-panel #cols { display: block; }
+    body.has-panel #sidepanel { flex: none; max-width: none; position: static;
            max-height: none; margin-top: 1.5rem; }
   }
   #bar { position: sticky; top: 0; background: Canvas; padding: .7rem 0 .6rem;
@@ -554,20 +585,26 @@ VIEWER = """<!doctype html>
     <div id="state">loading&hellip;</div>
     <div id="list"></div>
   </div>
-  <aside id="notepanel">
-    <div class="nhead">
-      <h2 class="ntitle">Notes</h2>
-      <button id="noteEdit" class="nbtn" type="button">Edit</button>
+  <aside id="sidepanel">
+    <div class="ptabs">
+      <button class="ptab active" id="tabReflection" type="button">Reflection</button>
+      <button class="ptab" id="tabNote" type="button">Note</button>
     </div>
-    <div class="nbody"></div>
-    <div id="noteEditor" class="hide">
-      <textarea id="noteText" placeholder="Write notes in Markdown&hellip;"></textarea>
-      <div class="nactions">
-        <button id="noteSave" class="nbtn" type="button">Save</button>
-        <button id="noteCancel" class="nbtn" type="button">Cancel</button>
-        <span class="nstatus" id="noteStatus"></span>
+    <section class="tabpane" id="paneReflection">
+      <div class="pbody" id="reflectionBody"></div>
+    </section>
+    <section class="tabpane hide" id="paneNote">
+      <div class="nhead"><button id="noteEdit" class="nbtn" type="button">Edit</button></div>
+      <div class="pbody" id="noteBody"></div>
+      <div id="noteEditor" class="hide">
+        <textarea id="noteText" placeholder="Write notes in Markdown&hellip;"></textarea>
+        <div class="nactions">
+          <button id="noteSave" class="nbtn" type="button">Save</button>
+          <button id="noteCancel" class="nbtn" type="button">Cancel</button>
+          <span class="nstatus" id="noteStatus"></span>
+        </div>
       </div>
-    </div>
+    </section>
   </aside>
 </div>
 <script>
@@ -740,33 +777,48 @@ async function load() {
   state.remove();
 }
 
-// Notes side panel: an editable, hand-authored note for this stem. The server
-// always answers 200 — {exists:false} just means the panel starts empty. Saving
-// writes NOTES/<stem>.note.md (the only read-write content dir); any failure is
-// surfaced inline and never affects the transcript itself (graceful absence).
+// Side panel: two tabs — Reflection (read-only, shown first, the substantive
+// write-up) and Note (editable scratch). Both are fetched per stem and both are
+// optional; the server always answers 200, so an absent one just shows an empty
+// state. The panel is always present so a note can be added anytime. Every
+// failure is swallowed so the transcript itself is never affected.
 let noteMarkdown = '';
-const noteBodyEl = () => document.querySelector('#notepanel .nbody');
 
-function renderNote(htmlStr) {
-  const body = noteBodyEl();
-  if (htmlStr) { body.innerHTML = htmlStr; body.classList.remove('nempty'); }
-  else { body.textContent = 'No notes yet.'; body.classList.add('nempty'); }
+function renderInto(el, htmlStr, emptyMsg) {
+  if (htmlStr) { el.innerHTML = htmlStr; el.classList.remove('pempty'); }
+  else { el.textContent = emptyMsg; el.classList.add('pempty'); }
+}
+
+function showTab(which) {
+  const refl = which === 'reflection';
+  document.getElementById('paneReflection').classList.toggle('hide', !refl);
+  document.getElementById('paneNote').classList.toggle('hide', refl);
+  document.getElementById('tabReflection').classList.toggle('active', refl);
+  document.getElementById('tabNote').classList.toggle('active', !refl);
+}
+
+async function loadReflection() {
+  const el = document.getElementById('reflectionBody');
+  try {
+    const r = await fetch('/reflection/' + encodeURIComponent(STEM));
+    const data = r.ok ? await r.json() : {};
+    renderInto(el, data.exists ? data.html : '', 'No reflection.');
+  } catch (e) { renderInto(el, '', 'No reflection.'); }
 }
 
 async function loadNote() {
-  document.body.classList.add('has-notes');     // panel is always available
+  const el = document.getElementById('noteBody');
   try {
     const r = await fetch('/note/' + encodeURIComponent(STEM));
-    if (!r.ok) { renderNote(''); return; }
-    const data = await r.json();
+    const data = r.ok ? await r.json() : {};
     noteMarkdown = data.markdown || '';
-    renderNote(data.exists ? data.html : '');
-  } catch (e) { renderNote(''); }               // never break the viewer over a note
+    renderInto(el, data.exists ? data.html : '', 'No notes yet.');
+  } catch (e) { renderInto(el, '', 'No notes yet.'); }
 }
 
 function noteEdit(on) {
   document.getElementById('noteEditor').classList.toggle('hide', !on);
-  noteBodyEl().classList.toggle('hide', on);
+  document.getElementById('noteBody').classList.toggle('hide', on);
   document.getElementById('noteEdit').classList.toggle('hide', on);
   if (on) {
     document.getElementById('noteText').value = noteMarkdown;
@@ -787,11 +839,14 @@ async function saveNote() {
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || ('HTTP ' + r.status));
     noteMarkdown = md;
-    renderNote(data.exists ? data.html : '');
+    renderInto(document.getElementById('noteBody'), data.exists ? data.html : '', 'No notes yet.');
     noteEdit(false);
   } catch (e) { status.textContent = 'save failed: ' + e.message; }
 }
 
+document.body.classList.add('has-panel');       // panel (both tabs) always available
+document.getElementById('tabReflection').addEventListener('click', () => showTab('reflection'));
+document.getElementById('tabNote').addEventListener('click', () => showTab('note'));
 document.getElementById('noteEdit').addEventListener('click', () => noteEdit(true));
 document.getElementById('noteCancel').addEventListener('click', () => noteEdit(false));
 document.getElementById('noteSave').addEventListener('click', saveNote);
@@ -878,6 +933,7 @@ document.getElementById('prev').addEventListener('click', () => step(-1));
 document.getElementById('next').addEventListener('click', () => step(1));
 
 load().catch(err => { state.textContent = 'failed to load: ' + err; });
+loadReflection();
 loadNote();
 </script></body></html>"""
 
@@ -914,6 +970,9 @@ class Handler(SimpleHTTPRequestHandler):
         m = re.match(r"^/note/([^/]+)$", path)
         if m:
             return self._note_get(urllib.parse.unquote(m.group(1)))
+        m = re.match(r"^/reflection/([^/]+)$", path)
+        if m:
+            return self._reflection_get(urllib.parse.unquote(m.group(1)))
         return super().do_GET()
 
     def do_HEAD(self):
@@ -980,6 +1039,16 @@ class Handler(SimpleHTTPRequestHandler):
         if roster is None:
             return self._json(404, {"error": "no transcript JSON for that name"})
         return self._json(200, {"stem": stem, "roster": roster})
+
+    def _reflection_get(self, raw):
+        """Read-only reflection (if any) for one meeting, rendered to HTML. Always
+        200: {"exists": bool, "html": str}. No reflection -> exists=false and the
+        Reflection tab shows an empty state. Never an error."""
+        stem = safe_name(raw)
+        if not stem:
+            return self._json(400, {"error": "bad name"})
+        body = reflection_html(stem)
+        return self._json(200, {"exists": body is not None, "html": body or ""})
 
     def _note_get(self, raw):
         """Editable note (if any) for one meeting. Always 200:
