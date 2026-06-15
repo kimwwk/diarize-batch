@@ -5,7 +5,7 @@ No GPU / RunPod. Pulls the transcript from the Fireflies GraphQL API, renders it
 through the project's own ``orchestrator/render.py`` (so the output is
 byte-identical to what the WhisperX+pyannote pipeline would produce), seeds the
 speaker name map from Fireflies' speaker labels, drops the AI summary into a
-``.reflection.md`` side-panel, and downloads the audio. The finished artifacts
+editable ``.note.md`` side-panel, and downloads the audio. The finished artifacts
 land straight in ``data/outbox/`` + ``data/done/``, so the orchestrator never
 fires and no pod ever boots. Stdlib only.
 
@@ -157,7 +157,7 @@ def build_result(t, model, language):
     return result, name_by_raw
 
 
-def write_reflection(summary, path):
+def write_note(summary, path):
     def block(title, val):
         if not val:
             return ""
@@ -221,6 +221,7 @@ def main(argv=None):
     p.add_argument("--language", default="en")
     p.add_argument("--outbox", help="transcript dir (default <repo>/data/outbox)")
     p.add_argument("--done", help="audio archive dir (default <repo>/data/done)")
+    p.add_argument("--notes", help="editable-notes dir (default <repo>/data/notes)")
     p.add_argument("--db", help="speaker name DB (default <repo>/data/db/speakers.db)")
     p.add_argument("--secrets-dir", default=os.path.join(REPO, "secrets"))
     p.add_argument("--no-names", action="store_true", help="don't seed the speaker name map")
@@ -230,11 +231,12 @@ def main(argv=None):
 
     if args.dry_run:
         base = os.path.join(os.getcwd(), "_fireflies_preview")
-        outbox = done = base
+        outbox = done = notes = base
         db_path = os.path.join(base, "speakers.db")
     else:
         outbox = args.outbox or os.path.join(REPO, "data", "outbox")
         done = args.done or os.path.join(REPO, "data", "done")
+        notes = args.notes or os.path.join(REPO, "data", "notes")
         db_path = args.db or os.path.join(REPO, "data", "db", "speakers.db")
 
     api_key = resolve_api_key(args.api_key, args.secrets_dir)
@@ -257,7 +259,11 @@ def main(argv=None):
     os.makedirs(outbox, exist_ok=True)
     out_stem = os.path.join(outbox, stem)
     paths = render.write_outputs(result, out_stem, source_name)
-    has_refl = write_reflection(t.get("summary") or {}, out_stem + ".reflection.md")
+    # The Fireflies summary seeds the editable note (NOTES/<stem>.note.md); the
+    # user can then edit/replace it in the viewer. NOTES is a separate dir.
+    os.makedirs(notes, exist_ok=True)
+    note_file = os.path.join(notes, stem + ".note.md")
+    has_note = write_note(t.get("summary") or {}, note_file)
 
     if not args.no_names and name_by_raw:
         seed_names(db_path, stem, name_by_raw)
@@ -278,10 +284,10 @@ def main(argv=None):
     print(f"  segments    : {len(result['segments'])} | speakers: {result['num_speakers']} "
           f"| dur: {render._short_ts(result['duration'])}")
     print(f"  names       : {name_by_raw or '(none)'}{' [SKIPPED]' if args.no_names else ''}")
-    print(f"  reflection  : {'written' if has_refl else 'no summary available'}")
+    print(f"  note        : {'seeded ' + os.path.basename(note_file) if has_note else 'no summary available'}")
     print(f"  audio       : {audio_note}")
     print(f"  files       : {', '.join(os.path.basename(x) for x in paths)}"
-          + (", "+stem+".reflection.md" if has_refl else ""))
+          + (", "+os.path.basename(note_file) if has_note else ""))
     if args.dry_run:
         print(f"\n  DRY RUN — wrote to {outbox} ; nothing live touched.")
     else:

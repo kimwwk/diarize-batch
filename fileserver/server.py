@@ -25,12 +25,14 @@ Routes
                             resolved display name (manual > voice-match > "Speaker
                             N"), source, and talk-time. The "see all speakers"
                             API; also what the viewer's mapping panel shows.
-  GET  /reflection/<stem>-> JSON {"exists","html"} for a hand-authored reflection
-                            note attached to a transcript by stem (drop
-                            OUTBOX/<stem>.reflection.md). The raw .md is kept
-                            verbatim; html is a rendered copy. Always 200 — no
-                            reflection just means exists=false, so a transcript
-                            without one renders exactly as before, no panel.
+  GET  /note/<stem>      -> JSON {"exists","markdown","html"} for the editable,
+                            hand-authored note attached to a transcript by stem
+                            (NOTES/<stem>.note.md). Always 200 — no note just
+                            means exists=false, so the viewer shows an empty
+                            (still editable) panel.
+  POST /note/<stem>      -> save the note (body {"markdown":"..."}); a blank body
+                            clears it. Writes to the read-write NOTES dir; OUTBOX
+                            stays read-only. Requires the transcript to exist.
   PUT  /upload/<name>    -> stream the request body into INBOX, atomically:
                             writes INBOX/.<name>.part, then os.replace() to
                             INBOX/<name>. The orchestrator skips dotfiles, so it
@@ -52,6 +54,11 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 OUTBOX = os.environ.get("OUTBOX_DIR", "/data/outbox")
 INBOX = os.environ.get("INBOX_DIR", "/data/inbox")
 DONE = os.environ.get("DONE_DIR", "/data/done")
+# Hand-authored, editable notes — one per transcript, by stem
+# (NOTES/<stem>.note.md). Unlike OUTBOX (immutable pipeline output, mounted
+# read-only), NOTES is mounted read-WRITE so the viewer's "Save" can write here.
+# Absence is normal and never an error.
+NOTES = os.environ.get("NOTES_DIR", "/data/notes")
 # SQLite name map: one (meeting, speaker_raw) -> human name. Additive override
 # layer the viewer renders on top of the auto voice-match; never touches the
 # transcript. Shared with tools/names.py + tools/enroll.py over the data volume.
@@ -190,14 +197,15 @@ def roster_for(stem):
     return roster
 
 
-# --- reflections ----------------------------------------------------------
-# A reflection is a hand-authored Markdown note attached to one transcript by
-# stem: drop OUTBOX/<stem>.reflection.md and the viewer shows it in a side
-# panel beside the turns. The file on disk is the source of truth and is kept
-# verbatim; we only render a copy to HTML for display. Absence is normal —
-# reflection_html() returns None and the viewer simply shows no panel.
-def reflection_path(stem):
-    return os.path.join(OUTBOX, stem + ".reflection.md")
+# --- notes ----------------------------------------------------------------
+# A note is a hand-authored Markdown file attached to one transcript by stem and
+# editable from the viewer: NOTES/<stem>.note.md. NOTES is mounted read-WRITE
+# (OUTBOX is read-only), so the viewer's "Save" writes here. The file on disk is
+# the source of truth, kept verbatim; we only render a copy to HTML for display.
+# Absence is normal — note_html() returns None and the viewer shows an empty
+# (but still editable) panel.
+def note_path(stem):
+    return os.path.join(NOTES, stem + ".note.md")
 
 
 def _md_inline(text):
@@ -224,7 +232,7 @@ def md_to_html(text):
     """Minimal, safe Markdown -> HTML. Everything is HTML-escaped first, so the
     output can't inject markup; we then re-introduce only a known set of tags
     (headings, lists, blockquotes, code, paragraphs, inline emphasis/links).
-    Good enough for hand-written reflection notes; keeps the raw .md verbatim."""
+    Good enough for hand-written notes; keeps the raw .md verbatim."""
     out, para, list_stack, in_code = [], [], [], False
     code_buf = []
 
@@ -299,17 +307,44 @@ def md_to_html(text):
     return "\n".join(out)
 
 
-def reflection_html(stem):
-    """Rendered HTML for OUTBOX/<stem>.reflection.md, or None if there is no
-    reflection for this stem (the common case — handled gracefully)."""
-    path = reflection_path(stem)
-    if not os.path.isfile(path):
+def note_markdown(stem):
+    """Raw Markdown for NOTES/<stem>.note.md, or "" if there is none."""
+    try:
+        with open(note_path(stem), encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def note_html(stem):
+    """Rendered HTML for the note, or None when there is no note for this stem
+    (the common case — handled gracefully)."""
+    md = note_markdown(stem)
+    if not md.strip():
         return None
     try:
-        with open(path, encoding="utf-8") as fh:
-            return md_to_html(fh.read())
-    except Exception:  # noqa: BLE001 — a bad/unreadable file must not break the viewer
+        return md_to_html(md)
+    except Exception:  # noqa: BLE001 — a bad note must never break the viewer
         return None
+
+
+def save_note(stem, markdown):
+    """Write NOTES/<stem>.note.md atomically, or delete it when blank. Returns
+    the rendered HTML (None when cleared). NOTES is the only read-write data dir
+    the fileserver touches for content, so this can never clobber a transcript."""
+    path = note_path(stem)
+    if not markdown.strip():
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
+    os.makedirs(NOTES, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(markdown)
+    os.replace(tmp, path)
+    return note_html(stem)
 
 
 PAGE = """<!doctype html>
@@ -397,39 +432,51 @@ VIEWER = """<!doctype html>
   :root { color-scheme: dark light; }
   body { font: 15px/1.6 system-ui, sans-serif; max-width: 760px; margin: 0 auto;
          padding: 0 1rem 4rem; }
-  /* When a reflection is attached, widen to two columns and put the transcript
-     and the reflection side by side; otherwise the page stays exactly as it was
-     (single 760px column, no panel). */
-  body.has-reflection { max-width: 1180px; }
-  body.has-reflection #cols { display: flex; gap: 1.6rem; align-items: flex-start; }
-  body.has-reflection #main { flex: 1 1 0; min-width: 0; }
-  #reflection { display: none; }
-  body.has-reflection #reflection { display: block; flex: 0 0 360px;
+  /* Notes panel: an editable, hand-authored note per transcript, beside the
+     turns. Always available now (you can add one anytime); empty is fine. */
+  body.has-notes { max-width: 1180px; }
+  body.has-notes #cols { display: flex; gap: 1.6rem; align-items: flex-start; }
+  body.has-notes #main { flex: 1 1 0; min-width: 0; }
+  #notepanel { display: none; }
+  body.has-notes #notepanel { display: block; flex: 0 0 360px;
          max-width: 42%; position: sticky; top: 4.2rem; align-self: flex-start;
          max-height: calc(100vh - 5rem); overflow: auto;
          border: 1px solid #8884; border-radius: 12px; padding: .2rem 1.1rem 1rem;
          background: rgba(127,127,127,.05); }
-  #reflection h2.rtitle { font: 600 .8rem ui-monospace, monospace; color: #888;
-         text-transform: uppercase; letter-spacing: .05em; margin: 1rem 0 .3rem;
-         position: sticky; top: 0; background: Canvas; padding: .4rem 0; }
-  #reflection .rbody { font-size: 14px; }
-  #reflection .rbody h1 { font-size: 1.15rem; }
-  #reflection .rbody h2 { font-size: 1rem; text-transform: none; letter-spacing: 0;
+  #notepanel .nhead { display: flex; align-items: center; justify-content: space-between;
+         gap: .5rem; position: sticky; top: 0; background: Canvas;
+         padding: .4rem 0; margin: .6rem 0 .35rem; }
+  #notepanel h2.ntitle { font: 600 .8rem ui-monospace, monospace; color: #888;
+         text-transform: uppercase; letter-spacing: .05em; margin: 0; }
+  .nbtn { font: 12px ui-monospace, monospace; background: transparent;
+         border: 1px solid #8886; border-radius: 6px; color: inherit;
+         cursor: pointer; padding: .15rem .55rem; }
+  .nbtn:hover { border-color: #4a9; color: #4a9; }
+  .nempty { color: #888; font-style: italic; }
+  #notepanel .nbody { font-size: 14px; }
+  #notepanel .nbody h1 { font-size: 1.15rem; }
+  #notepanel .nbody h2 { font-size: 1rem; text-transform: none; letter-spacing: 0;
          color: inherit; margin: 1.1rem 0 .3rem; }
-  #reflection .rbody h3 { font-size: .92rem; margin: .9rem 0 .25rem; }
-  #reflection .rbody blockquote { margin: .6rem 0; padding: .1rem 0 .1rem .8rem;
+  #notepanel .nbody h3 { font-size: .92rem; margin: .9rem 0 .25rem; }
+  #notepanel .nbody blockquote { margin: .6rem 0; padding: .1rem 0 .1rem .8rem;
          border-left: 3px solid #8886; color: #999; }
-  #reflection .rbody code { font: 12.5px ui-monospace, monospace;
+  #notepanel .nbody code { font: 12.5px ui-monospace, monospace;
          background: rgba(127,127,127,.18); padding: .05rem .3rem; border-radius: 4px; }
-  #reflection .rbody pre { background: rgba(127,127,127,.12); padding: .6rem .8rem;
+  #notepanel .nbody pre { background: rgba(127,127,127,.12); padding: .6rem .8rem;
          border-radius: 8px; overflow: auto; }
-  #reflection .rbody pre code { background: none; padding: 0; }
-  #reflection .rbody a { color: #4a9; }
-  #reflection .rbody li { margin: .15rem 0; }
+  #notepanel .nbody pre code { background: none; padding: 0; }
+  #notepanel .nbody a { color: #4a9; }
+  #notepanel .nbody li { margin: .15rem 0; }
+  #notepanel textarea { width: 100%; box-sizing: border-box; min-height: 48vh;
+         font: 13px/1.5 ui-monospace, monospace; padding: .6rem .7rem;
+         border: 1px solid #8886; border-radius: 8px; background: transparent;
+         color: inherit; resize: vertical; }
+  #notepanel .nactions { display: flex; align-items: center; gap: .5rem; margin-top: .5rem; }
+  #notepanel .nstatus { font: 12px ui-monospace, monospace; color: #888; }
   @media (max-width: 860px) {
-    body.has-reflection { max-width: 760px; }
-    body.has-reflection #cols { display: block; }
-    body.has-reflection #reflection { flex: none; max-width: none; position: static;
+    body.has-notes { max-width: 760px; }
+    body.has-notes #cols { display: block; }
+    body.has-notes #notepanel { flex: none; max-width: none; position: static;
            max-height: none; margin-top: 1.5rem; }
   }
   #bar { position: sticky; top: 0; background: Canvas; padding: .7rem 0 .6rem;
@@ -507,9 +554,20 @@ VIEWER = """<!doctype html>
     <div id="state">loading&hellip;</div>
     <div id="list"></div>
   </div>
-  <aside id="reflection">
-    <h2 class="rtitle">Reflection</h2>
-    <div class="rbody"></div>
+  <aside id="notepanel">
+    <div class="nhead">
+      <h2 class="ntitle">Notes</h2>
+      <button id="noteEdit" class="nbtn" type="button">Edit</button>
+    </div>
+    <div class="nbody"></div>
+    <div id="noteEditor" class="hide">
+      <textarea id="noteText" placeholder="Write notes in Markdown&hellip;"></textarea>
+      <div class="nactions">
+        <button id="noteSave" class="nbtn" type="button">Save</button>
+        <button id="noteCancel" class="nbtn" type="button">Cancel</button>
+        <span class="nstatus" id="noteStatus"></span>
+      </div>
+    </div>
   </aside>
 </div>
 <script>
@@ -682,19 +740,61 @@ async function load() {
   state.remove();
 }
 
-// Reflection side panel: fetch the (optional) hand-authored note for this stem.
-// The server always answers 200 — {exists:false} just means no panel. Any
-// failure is swallowed so the transcript is never affected (graceful absence).
-async function loadReflection() {
-  try {
-    const r = await fetch('/reflection/' + encodeURIComponent(STEM));
-    if (!r.ok) return;
-    const data = await r.json();
-    if (!data.exists || !data.html) return;     // no reflection -> no panel
-    document.querySelector('#reflection .rbody').innerHTML = data.html;
-    document.body.classList.add('has-reflection');
-  } catch (e) { /* never break the viewer over a reflection */ }
+// Notes side panel: an editable, hand-authored note for this stem. The server
+// always answers 200 — {exists:false} just means the panel starts empty. Saving
+// writes NOTES/<stem>.note.md (the only read-write content dir); any failure is
+// surfaced inline and never affects the transcript itself (graceful absence).
+let noteMarkdown = '';
+const noteBodyEl = () => document.querySelector('#notepanel .nbody');
+
+function renderNote(htmlStr) {
+  const body = noteBodyEl();
+  if (htmlStr) { body.innerHTML = htmlStr; body.classList.remove('nempty'); }
+  else { body.textContent = 'No notes yet.'; body.classList.add('nempty'); }
 }
+
+async function loadNote() {
+  document.body.classList.add('has-notes');     // panel is always available
+  try {
+    const r = await fetch('/note/' + encodeURIComponent(STEM));
+    if (!r.ok) { renderNote(''); return; }
+    const data = await r.json();
+    noteMarkdown = data.markdown || '';
+    renderNote(data.exists ? data.html : '');
+  } catch (e) { renderNote(''); }               // never break the viewer over a note
+}
+
+function noteEdit(on) {
+  document.getElementById('noteEditor').classList.toggle('hide', !on);
+  noteBodyEl().classList.toggle('hide', on);
+  document.getElementById('noteEdit').classList.toggle('hide', on);
+  if (on) {
+    document.getElementById('noteText').value = noteMarkdown;
+    document.getElementById('noteStatus').textContent = '';
+    document.getElementById('noteText').focus();
+  }
+}
+
+async function saveNote() {
+  const md = document.getElementById('noteText').value;
+  const status = document.getElementById('noteStatus');
+  status.textContent = 'saving…';
+  try {
+    const r = await fetch('/note/' + encodeURIComponent(STEM), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ markdown: md }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || ('HTTP ' + r.status));
+    noteMarkdown = md;
+    renderNote(data.exists ? data.html : '');
+    noteEdit(false);
+  } catch (e) { status.textContent = 'save failed: ' + e.message; }
+}
+
+document.getElementById('noteEdit').addEventListener('click', () => noteEdit(true));
+document.getElementById('noteCancel').addEventListener('click', () => noteEdit(false));
+document.getElementById('noteSave').addEventListener('click', saveNote);
 
 function seek(t) {
   if (!canPlay) return;
@@ -778,7 +878,7 @@ document.getElementById('prev').addEventListener('click', () => step(-1));
 document.getElementById('next').addEventListener('click', () => step(1));
 
 load().catch(err => { state.textContent = 'failed to load: ' + err; });
-loadReflection();
+loadNote();
 </script></body></html>"""
 
 
@@ -811,9 +911,9 @@ class Handler(SimpleHTTPRequestHandler):
         m = re.match(r"^/roster/([^/]+)$", path)
         if m:
             return self._roster_get(urllib.parse.unquote(m.group(1)))
-        m = re.match(r"^/reflection/([^/]+)$", path)
+        m = re.match(r"^/note/([^/]+)$", path)
         if m:
-            return self._reflection_get(urllib.parse.unquote(m.group(1)))
+            return self._note_get(urllib.parse.unquote(m.group(1)))
         return super().do_GET()
 
     def do_HEAD(self):
@@ -823,9 +923,13 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_HEAD()
 
     def do_POST(self):
-        m = re.match(r"^/names/([^/]+)$", urllib.parse.urlparse(self.path).path)
+        path = urllib.parse.urlparse(self.path).path
+        m = re.match(r"^/names/([^/]+)$", path)
         if m:
             return self._names_post(urllib.parse.unquote(m.group(1)))
+        m = re.match(r"^/note/([^/]+)$", path)
+        if m:
+            return self._note_post(urllib.parse.unquote(m.group(1)))
         return self._json(404, {"error": "not found"})
 
     def _viewer(self, raw):
@@ -877,15 +981,41 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(404, {"error": "no transcript JSON for that name"})
         return self._json(200, {"stem": stem, "roster": roster})
 
-    def _reflection_get(self, raw):
-        """Reflection note (if any) for one meeting, rendered to HTML. Always
-        200: {"exists": bool, "html": str}. No reflection -> exists=false, the
-        viewer just shows no panel. Never an error, so the page is unaffected."""
+    def _note_get(self, raw):
+        """Editable note (if any) for one meeting. Always 200:
+        {"exists": bool, "markdown": str, "html": str}. No note -> exists=false
+        with empty strings; the viewer shows an empty (still editable) panel.
+        Never an error, so the page is unaffected."""
         stem = safe_name(raw)
         if not stem:
             return self._json(400, {"error": "bad name"})
-        body = reflection_html(stem)
-        return self._json(200, {"exists": body is not None, "html": body or ""})
+        md = note_markdown(stem)
+        body = note_html(stem)
+        return self._json(200, {"exists": body is not None,
+                                "markdown": md, "html": body or ""})
+
+    def _note_post(self, raw):
+        """Save the editable note for one meeting (body {"markdown": "..."}); a
+        blank body clears it. Requires the transcript to exist, and writes only
+        to the read-write NOTES dir (OUTBOX stays read-only)."""
+        stem = safe_name(raw)
+        if not stem or not os.path.isfile(os.path.join(OUTBOX, stem + ".json")):
+            return self._json(404, {"error": "no transcript for that name"})
+        length = int(self.headers.get("Content-Length", "0"))
+        if length < 0 or length > 1 << 20:        # 1 MiB ceiling for a note
+            return self._json(400, {"error": "missing or oversized body"})
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+            markdown = str(payload.get("markdown", ""))
+        except Exception as exc:  # noqa: BLE001
+            return self._json(400, {"error": f"bad request: {exc}"})
+        try:
+            body = save_note(stem, markdown)
+        except Exception as exc:  # noqa: BLE001
+            return self._json(500, {"error": str(exc)})
+        self.log_message("note %s -> %d bytes", stem, len(markdown))
+        return self._json(200, {"ok": True, "exists": body is not None,
+                                "html": body or ""})
 
     def _audio(self, raw, head=False):
         """Serve DONE_DIR/<stem>.<any audio ext> with HTTP Range support, so the
@@ -958,8 +1088,8 @@ class Handler(SimpleHTTPRequestHandler):
                 continue
             if n.endswith(".speakers.json"):  # additive side file, not a format
                 continue
-            if n.endswith(".reflection.md"):  # attached note, shown in the viewer
-                continue
+            if n.endswith(".note.md") or n.endswith(".reflection.md"):
+                continue  # attached note (current / legacy), shown in the viewer
             stem, ext = os.path.splitext(n)
             groups.setdefault(stem, {})[ext.lower()] = n
 

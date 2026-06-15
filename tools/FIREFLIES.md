@@ -4,7 +4,7 @@ Pull a **Fireflies.ai** meeting (transcript + audio) into this instance **withou
 the GPU pipeline**. It fetches the transcript from the Fireflies GraphQL API,
 renders it through the project's own `orchestrator/render.py` (byte-identical to a
 real pipeline run), seeds the speaker name map, drops the AI summary into a
-`.reflection.md` side-panel, and downloads the audio. The finished files land in
+editable `.note.md` side-panel, and downloads the audio. The finished files land in
 `data/outbox/` + `data/done/`, so the orchestrator never fires — **no pod, no GPU,
 $0**. Stdlib only.
 
@@ -14,7 +14,7 @@ $0**. Stdlib only.
 |---|---|---|
 | `sentences[]` (`speaker_id`, `text`, `start_time`/`end_time` in **seconds**) | → | `data/outbox/<stem>.{json,md,srt,txt}` (segments `SPEAKER_0N`) |
 | `speakers[]` (`id` → `name`) | → | manual name map in `data/db/speakers.db` |
-| `summary` (overview / action_items / keywords) | → | `data/outbox/<stem>.reflection.md` (viewer side panel) |
+| `summary` (overview / action_items / keywords) | → | `data/notes/<stem>.note.md` (editable viewer side panel) |
 | audio (signed CDN URL — see below) | → | `data/done/<stem>.mp3` (click-to-play) |
 
 ## Run (on the instance)

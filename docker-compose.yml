@@ -19,7 +19,8 @@ services:
   #   GET  http://<host>:8080/<name>.md   -> the transcript (.json/.srt/.txt too)
   #   GET  http://<host>:8080/audio/<stem> -> archived source audio (Range-capable)
   #   PUT  http://<host>:8080/upload/<name> -> drops audio straight into inbox/
-  # outbox/done are mounted read-only (can't be overwritten); only inbox/ is writable.
+  # outbox/done are mounted read-only (can't be overwritten); inbox/, db/ and
+  # notes/ are writable (uploads, the speaker name map, and editable notes).
   diarize-fileserver:
     image: python:3.12-slim
     container_name: diarize-fileserver
@@ -30,6 +31,7 @@ services:
       INBOX_DIR: /data/inbox
       DONE_DIR: /data/done
       DB_DIR: /data/db
+      NOTES_DIR: /data/notes
       PORT: "8080"
       MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-2048}"
       AUDIO_EXTS: "${AUDIO_EXTS:-}"      # blank -> server.py's built-in default
@@ -39,7 +41,8 @@ services:
       - ${DATA_DIR:-./data}/outbox:/data/outbox:ro
       - ${DATA_DIR:-./data}/done:/data/done:ro
       - ${DATA_DIR:-./data}/inbox:/data/inbox
-      - ${DATA_DIR:-./data}/db:/data/db    # SQLite speaker name map (read-write)
+      - ${DATA_DIR:-./data}/db:/data/db      # SQLite speaker name map (read-write)
+      - ${DATA_DIR:-./data}/notes:/data/notes  # editable per-transcript notes (read-write)
     ports:
       - "${LINKS_PORT:-8080}:8080"
 
