@@ -34,6 +34,40 @@ def _is_audio(path):
     return os.path.splitext(path)[1].lower() in config.AUDIO_EXTS
 
 
+# ISO codes WhisperX/faster-whisper accepts. A meeting file may carry an explicit
+# language as a trailing ".<code>" before its extension to override the global
+# autodetect default for that one file — e.g. "2026-06-19-1307_Yongling.zh.m4a".
+# Validating against this set keeps a normal slug that happens to end in ".xx"
+# from being mistaken for a tag.
+WHISPER_LANGS = {
+    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl",
+    "ar", "sv", "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro",
+    "da", "hu", "ta", "no", "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy",
+    "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn", "et", "mk", "br", "eu",
+    "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw", "gl", "mr", "pa", "si", "km",
+    "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu", "am", "yi", "lo",
+    "uz", "fo", "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl", "mg",
+    "as", "tt", "haw", "ln", "ha", "ba", "jw", "su", "yue",
+}
+
+
+def split_lang_tag(name):
+    """Split a filename into (clean_name, language).
+
+    A meeting file may carry an explicit language as a trailing ".<code>" before
+    its extension to force that language for the one file, overriding the global
+    autodetect/LANGUAGE default — e.g. "2026-06-19-1307_Yongling.zh.m4a" ->
+    ("2026-06-19-1307_Yongling.m4a", "zh"). The tag is stripped from the name so
+    the transcript stem, the /view URL, and the archived audio all stay clean.
+    With no recognised tag, returns the name unchanged and the global default.
+    """
+    root, ext = os.path.splitext(name)
+    base, dot, tag = root.rpartition(".")
+    if dot and tag.lower() in WHISPER_LANGS:
+        return base + ext, tag.lower()
+    return name, config.LANGUAGE
+
+
 def stable_files():
     """Audio files untouched for STABLE_SECONDS (so we don't grab a mid-copy file)."""
     now = time.time()
@@ -61,14 +95,17 @@ def to_flac(src, dst):
 def process(path, t_detect):
     """Transcribe one file via the (already-up) pod and write outputs."""
     name = os.path.basename(path)
-    stem = os.path.splitext(name)[0]
+    # A trailing ".<code>" (e.g. "…Yongling.zh.m4a") forces that language for this
+    # one file and is stripped so the stem/URL/archived audio stay clean.
+    clean_name, language = split_lang_tag(name)
+    stem = os.path.splitext(clean_name)[0]
     job_id = uuid.uuid4().hex[:8]
     flac = os.path.join(config.WORK_DIR, f"{job_id}.flac")
     to_flac(path, flac)
     try:
-        log(f"uploading '{name}' to pod ...")
+        log(f"uploading '{name}' to pod (lang={language or 'auto'}) ...")
         result = pod_manager.infer(
-            flac, language=config.LANGUAGE,
+            flac, language=language,
             min_speakers=config.MIN_SPEAKERS, max_speakers=config.MAX_SPEAKERS,
             initial_prompt=config.INITIAL_PROMPT, compute_type=config.COMPUTE_TYPE)
         if isinstance(result, dict) and "error" in result:
@@ -77,9 +114,9 @@ def process(path, t_detect):
             raise RuntimeError(f"pod returned no segments: {str(result)[:200]}")
 
         out_stem = os.path.join(config.OUTBOX_DIR, stem)
-        files = render.write_outputs(result, out_stem, name)
+        files = render.write_outputs(result, out_stem, clean_name)
         try:  # best-effort speaker tagging; must never fail the transcript
-            tag = speaker_id.write_speaker_map(flac, result.get("segments", []), out_stem, name)
+            tag = speaker_id.write_speaker_map(flac, result.get("segments", []), out_stem, clean_name)
             if tag:
                 files.append(tag)
                 log(f"speaker-id -> {os.path.basename(tag)}")
@@ -99,7 +136,7 @@ def process(path, t_detect):
     if config.DELETE_INPUT_AFTER:
         os.remove(path)
     else:
-        shutil.move(path, os.path.join(config.DONE_DIR, name))
+        shutil.move(path, os.path.join(config.DONE_DIR, clean_name))
 
 
 def fail_file(path, exc):
